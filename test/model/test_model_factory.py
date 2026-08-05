@@ -45,9 +45,49 @@ def test_falls_back_to_settings_when_params_omitted() -> None:
     fake_settings = MagicMock(
         DEFAULT_MODEL="deepseek-v4-pro", PROVIDER="deepseek",
         API_KEY="settings-key", BASE_URL="https://api.deepseek.com",
+        OPENAI_API_KEY="", OPENAI_BASE_URL="", OPENAI_MODEL_THINKING="",
     )
     with patch("src.agent_core.model.model_factory.get_settings", return_value=fake_settings):
         model = create_chat_model()
 
     assert isinstance(model, PatchedChatDeepSeek)
     assert model.api_key.get_secret_value() == "settings-key"
+
+
+def test_qwen_vllm_provider_selects_thinking_model_and_template_flag() -> None:
+    fake_settings = MagicMock(
+        DEFAULT_MODEL="qwen3", PROVIDER="vllm", API_KEY="", BASE_URL="",
+        OPENAI_API_KEY="local-key", OPENAI_BASE_URL="http://localhost:8001/v1",
+        OPENAI_MODEL_THINKING="qwen3-thinking",
+    )
+    with patch("src.agent_core.model.model_factory.get_settings", return_value=fake_settings):
+        with patch("src.agent_core.model.model_factory.PatchedChatOpenAI") as mock_chat_openai:
+            mock_chat_openai.return_value = MagicMock(name="qwen_model")
+
+            result = create_chat_model(thinking_enabled=True)
+
+    mock_chat_openai.assert_called_once_with(
+        model="qwen3-thinking",
+        api_key="local-key",
+        base_url="http://localhost:8001/v1",
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+    )
+    assert result is mock_chat_openai.return_value
+
+
+def test_qwen_vllm_provider_disables_thinking_on_shared_model() -> None:
+    fake_settings = MagicMock(
+        DEFAULT_MODEL="qwen3", PROVIDER="vllm", API_KEY="", BASE_URL="",
+        OPENAI_API_KEY="local-key", OPENAI_BASE_URL="http://localhost:8001/v1",
+        OPENAI_MODEL_THINKING="qwen3",
+    )
+    with patch("src.agent_core.model.model_factory.get_settings", return_value=fake_settings):
+        with patch("src.agent_core.model.model_factory.PatchedChatOpenAI") as mock_chat_openai:
+            create_chat_model(thinking_enabled=False)
+
+    mock_chat_openai.assert_called_once_with(
+        model="qwen3",
+        api_key="local-key",
+        base_url="http://localhost:8001/v1",
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )

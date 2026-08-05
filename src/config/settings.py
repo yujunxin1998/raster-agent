@@ -31,10 +31,20 @@ class SystemConfiguration(BaseSettings):
     APP_VERSION: str = os.getenv("APP_VERSION", "0.1.0")
 
     # ================ 大语言模型环境依赖 ========================
-    API_KEY: str = os.getenv("API_KEY", "")
-    BASE_URL: str = os.getenv("BASE_URL", "")
-    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "")
-    PROVIDER: str = os.getenv("PROVIDER", "deepseek")
+    API_KEY: str = os.getenv("OPENAI_API_KEY", os.getenv("API_KEY", ""))
+    BASE_URL: str = os.getenv("OPENAI_BASE_URL", os.getenv("BASE_URL", ""))
+    DEFAULT_MODEL: str = os.getenv("OPENAI_MODEL", os.getenv("DEFAULT_MODEL", ""))
+    PROVIDER: str = os.getenv(
+        "PROVIDER", "vllm" if os.getenv("OPENAI_BASE_URL") else "deepseek"
+    )
+
+    # ================ OpenAI-compatible / vLLM ==================
+    # DeerFlow-style model configuration.  These variables are preferred when
+    # present, while the legacy names above remain supported.
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "")
+    OPENAI_MODEL_THINKING: str = os.getenv("OPENAI_MODEL_THINKING", "")
 
     # ================ 数据库（storage 层） ======================
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
