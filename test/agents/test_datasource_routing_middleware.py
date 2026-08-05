@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from langchain.agents.middleware import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agent_core.agents.datasource_routing_middleware import DatasourceRoutingMiddleware
 from src.agent_core.middlewares.context import AgentRuntimeContext
@@ -33,8 +33,8 @@ async def test_retries_once_when_datasource_configured_but_not_delegated() -> No
 
     assert handler.await_count == 2
     retried_request = handler.await_args_list[1].args[0]
-    assert isinstance(retried_request.messages[-1], SystemMessage)
-    assert "delegate_to_database_agent" in retried_request.messages[-1].content
+    assert retried_request.messages == request.messages
+    assert "delegate_to_database_agent" in retried_request.system_prompt
     assert result is second_response
 
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from loguru import logger
 
 from src.agent_core.middlewares.context import AgentRuntimeContext
@@ -78,5 +78,15 @@ class DatasourceRoutingMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
             f"[DatasourceRoutingMiddleware] 已配置 datasource_id={datasource_id} 但模型未调用 "
             f"{_DATABASE_DELEGATE_TOOL_NAME}，注入纠正提示并重试一次"
         )
-        corrected_request = request.override(messages=[*request.messages, SystemMessage(content=_CORRECTION_MESSAGE)])
+        # Do not append a SystemMessage to the end of the history. Qwen/vLLM
+        # chat templates require system messages to appear before all user and
+        # assistant messages. Override the transient system prompt instead;
+        # this keeps the checkpoint/history unchanged and lets the model
+        # adapter place the prompt at the beginning of the request.
+        corrected_prompt = (
+            f"{request.system_prompt}\n\n{_CORRECTION_MESSAGE}"
+            if request.system_prompt
+            else _CORRECTION_MESSAGE
+        )
+        corrected_request = request.override(system_prompt=corrected_prompt)
         return await handler(corrected_request)

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.message import RemoveMessage
 
 from src.agent_core.memory.memory_compressor import MemoryCompressor
@@ -51,11 +51,15 @@ async def test_above_threshold_compresses_and_builds_state_update() -> None:
     assert outcome.compressed_count == 2  # 保留最近 1 条，压缩前面 2 条
 
     update_messages = outcome.state_update["messages"]
-    assert len(update_messages) == 3  # 2 条 RemoveMessage + 1 条摘要 SystemMessage
+    assert len(update_messages) == 3  # 2 条 RemoveMessage + 1 条摘要 AIMessage
     assert all(isinstance(message, RemoveMessage) for message in update_messages[:2])
     assert {message.id for message in update_messages[:2]} == {"0", "1"}
-    assert isinstance(update_messages[2], SystemMessage)
-    assert update_messages[2].content == "摘要内容"
+    # 摘要必须是 AIMessage 而非 SystemMessage：压缩后它停留在消息历史中间，
+    # Qwen/vLLM 等模型的 chat template 要求 system 消息必须在最前面，
+    # 非开头位置的 SystemMessage 会触发 400 "System message must be at the
+    # beginning" 错误（见 memory_compressor.py 内注释）。
+    assert isinstance(update_messages[2], AIMessage)
+    assert update_messages[2].content == "[历史摘要]\n摘要内容"
 
 
 async def test_summary_generation_failure_returns_none() -> None:

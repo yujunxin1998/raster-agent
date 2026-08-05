@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.message import RemoveMessage
 from loguru import logger
 
@@ -47,7 +47,7 @@ class CompressionOutcome:
         summary: 生成的结构化摘要文本。
         compressed_count: 被压缩掉的原始消息条数。
         state_update: 可直接作为 LangGraph 中间件钩子返回值的 state 更新
-            （`{"messages": [RemoveMessage(...), ..., SystemMessage(...)]}`），
+            （`{"messages": [RemoveMessage(...), ..., AIMessage(...)]}`），
             框架会把它自动合并进 checkpoint，不需要调用方手动
             `graph.aupdate_state`。
     """
@@ -122,7 +122,12 @@ class MemoryCompressor:
             return None
 
         removes = [RemoveMessage(id=message.id) for message in old_messages]
-        summary_message = SystemMessage(content=summary_text)
+        # 摘要以 AIMessage（而非 SystemMessage）形式插入历史中间：Qwen/vLLM 等
+        # 模型的 chat template 强制要求 system 消息必须位于消息列表最前面，
+        # 而这条摘要在压缩后会长期停留在"保留的最近消息"之前——用 SystemMessage
+        # 会导致后续每一轮请求都携带一条非开头位置的 system 消息，触发
+        # `System message must be at the beginning` 400 错误。
+        summary_message = AIMessage(content=f"[历史摘要]\n{summary_text}")
         logger.info(f"[MemoryCompressor] 压缩完成，保留最近 {resolved_keep_recent} 条 + 摘要")
 
         return CompressionOutcome(
