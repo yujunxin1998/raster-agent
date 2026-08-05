@@ -24,7 +24,6 @@ from src.agent_core.prompts.prompt_factory import PromptFactory
 
 _TITLE_PROMPT_NAME = "TITLE_GENERATION"
 _MAX_TITLE_LENGTH = 20
-_FIRST_TURN_MESSAGE_COUNT = 2  # 一问一答
 
 
 class TitleMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
@@ -73,7 +72,16 @@ class TitleMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
         """
         context = runtime.context
         messages = state.get("messages") or []
-        if context is None or not context.conversation_id or len(messages) > _FIRST_TURN_MESSAGE_COUNT:
+        # 不能直接用 len(messages) 判断"是不是第一轮"——第一轮里只要触发过一次
+        # 工具调用（哪怕只是 search_knowledge_base/query_database 这类直接挂载
+        # 的技能，不需要好几轮），就会往消息列表里插入
+        # AIMessage(tool_calls=[...])/ToolMessage 这一对，把消息数顶到 2 条以上，
+        # 之前用固定阈值 2 判断会被直接跳过、标题永远生成不出来。改成数
+        # HumanMessage 的条数：第一轮不管中间发生了多少次工具调用，用户消息
+        # 永远只有 1 条；第二轮开始变成 2 条，自然不再触发（本中间件只想在
+        # 第一轮结束后生成一次标题）。
+        human_message_count = sum(1 for message in messages if isinstance(message, HumanMessage))
+        if context is None or not context.conversation_id or human_message_count != 1:
             return None
 
         user_message = self._last_text(messages, HumanMessage)
