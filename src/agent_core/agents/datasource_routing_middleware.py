@@ -1,0 +1,82 @@
+"""`datasource_id` 强制路由的硬校验中间件（设计文档 4.1 节）。
+
+原项目里"配置了 datasource_id 必须先路由到 database_agent"这条规则完全靠
+prompt 里的一段文案约束（`supervisor.md`"强制约束"一节），模型不遵守也没有
+兜底。这里把它升级成代码层面的硬拦截：本轮第一次模型响应时，如果
+`datasource_id` 已配置但模型的工具调用里没有 `delegate_to_database_agent`，
+注入一条纠正性 SystemMessage 强制重试一次；不管第二次结果如何都放行，避免
+死循环——这是"软提示（prompt）+ 硬拦截（本中间件）"两层防线里的第二层。
+
+不属于 `agent_core/middlewares/` 里那 11 个通用中间件——这是 Lead Agent 的
+专属业务规则（知道 `delegate_to_database_agent` 这个具体工具名），随
+`lead_agent.py` 的中间件列表追加，不进 `agent_core/loop.py::build_middlewares()`。
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from loguru import logger
+
+from src.agent_core.middlewares.context import AgentRuntimeContext
+
+_DATABASE_DELEGATE_TOOL_NAME = "delegate_to_database_agent"
+_CORRECTION_MESSAGE = (
+    f"检测到当前请求已配置数据源（datasource_id），本轮必须先调用 "
+    f"{_DATABASE_DELEGATE_TOOL_NAME} 完成查询，不得跳过、不得先做其他事情。"
+)
+
+
+def _is_first_response_this_turn(messages: list) -> bool:
+    """判断本次模型调用是不是本轮用户发言后的第一次响应。
+
+    从后往前扫描：先遇到 HumanMessage 说明还没有产生过响应（是第一次）；
+    先遇到 AIMessage 说明已经至少响应过一轮（不是第一次）。
+    """
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return True
+        if isinstance(message, AIMessage):
+            return False
+    return True
+
+
+def _has_database_delegate_call(result: list) -> bool:
+    """判断模型这次响应的工具调用里是否包含 `delegate_to_database_agent`。"""
+    return any(
+        isinstance(message, AIMessage)
+        and any(tool_call["name"] == _DATABASE_DELEGATE_TOOL_NAME for tool_call in (message.tool_calls or []))
+        for message in result
+    )
+
+
+class DatasourceRoutingMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
+    """配置了 datasource_id 时，强制本轮第一次响应必须调用数据库委派工具。"""
+
+    async def awrap_model_call(self, request: ModelRequest, handler) -> ModelResponse:
+        """必要时重试一次模型调用，注入纠正提示。
+
+        Args:
+            request: 本次模型调用请求。
+            handler: 执行模型调用的回调。
+
+        Returns:
+            模型调用结果（可能是重试后的结果）。
+        """
+        context = request.runtime.context
+        datasource_id = context.datasource_id if context else None
+
+        if not datasource_id or not _is_first_response_this_turn(request.messages):
+            return await handler(request)
+
+        response = await handler(request)
+        if _has_database_delegate_call(response.result):
+            return response
+
+        logger.warning(
+            f"[DatasourceRoutingMiddleware] 已配置 datasource_id={datasource_id} 但模型未调用 "
+            f"{_DATABASE_DELEGATE_TOOL_NAME}，注入纠正提示并重试一次"
+        )
+        corrected_request = request.override(messages=[*request.messages, SystemMessage(content=_CORRECTION_MESSAGE)])
+        return await handler(corrected_request)
