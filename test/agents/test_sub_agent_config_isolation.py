@@ -1,6 +1,6 @@
-"""`sub_agent_factory.build_delegate_tool` 的 config 隔离单元测试。
+"""`sub_agent_factory.run_subagent` 的 config 隔离单元测试。
 
-委派工具内部现造的子 Agent 必须只拿到 `configurable`，不能拿到外层的
+`task` 工具内部现造的子 Agent 必须只拿到 `configurable`，不能拿到外层的
 `callbacks`——否则子 Agent 自己的模型/工具调用事件会经由回调传播机制泄漏进
 外层 `astream_events` 流，污染用户可见的 token 流（见模块 docstring）。
 """
@@ -10,11 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage
 
-from src.agent_core.agents.sub_agent_factory import build_delegate_tool
-
-
-async def _invoke_tool(tool, task: str, config: dict) -> str:
-    return await tool.coroutine(task=task, config=config)
+from src.agent_core.agents.sub_agent_factory import run_subagent
 
 
 async def test_sub_agent_receives_isolated_config_without_callbacks() -> None:
@@ -23,16 +19,15 @@ async def test_sub_agent_receives_isolated_config_without_callbacks() -> None:
 
     with patch("src.agent_core.agents.sub_agent_factory.create_agent", return_value=fake_sub_agent), \
          patch("src.agent_core.agents.sub_agent_factory.create_chat_model", return_value=MagicMock()):
-        tool = build_delegate_tool(
-            tool_name="delegate_to_test_agent", description="test", system_prompt="you are a test agent",
-            tools_factory=lambda: [],
-        )
         outer_config = {
             "configurable": {"thread_id": "c1", "secrets": {}},
             "callbacks": [MagicMock()],  # 外层的回调链，不应该被透传给子 Agent
             "run_id": "outer-run-id",
         }
-        result = await _invoke_tool(tool, "帮我查一下天气", outer_config)
+        result = await run_subagent(
+            agent_name="web-researcher", system_prompt="you are a test agent",
+            tools=[], task="帮我查一下天气", config=outer_config,
+        )
 
     assert result == "子 Agent 的回复"
     fake_sub_agent.ainvoke.assert_awaited_once()
@@ -47,11 +42,25 @@ async def test_sub_agent_exception_returns_error_text_not_raise() -> None:
 
     with patch("src.agent_core.agents.sub_agent_factory.create_agent", return_value=fake_sub_agent), \
          patch("src.agent_core.agents.sub_agent_factory.create_chat_model", return_value=MagicMock()):
-        tool = build_delegate_tool(
-            tool_name="delegate_to_test_agent", description="test", system_prompt="you are a test agent",
-            tools_factory=lambda: [],
+        result = await run_subagent(
+            agent_name="web-researcher", system_prompt="you are a test agent",
+            tools=[], task="task", config={"configurable": {}},
         )
-        result = await _invoke_tool(tool, "task", {"configurable": {}})
 
-    assert "delegate_to_test_agent" in result
+    assert "web-researcher" in result
     assert "boom" in result
+
+
+async def test_sub_agent_no_reply_returns_fallback_text() -> None:
+    fake_sub_agent = MagicMock()
+    fake_sub_agent.ainvoke = AsyncMock(return_value={"messages": []})
+
+    with patch("src.agent_core.agents.sub_agent_factory.create_agent", return_value=fake_sub_agent), \
+         patch("src.agent_core.agents.sub_agent_factory.create_chat_model", return_value=MagicMock()):
+        result = await run_subagent(
+            agent_name="web-researcher", system_prompt="you are a test agent",
+            tools=[], task="task", config={"configurable": {}},
+        )
+
+    assert "web-researcher" in result
+    assert "未产生有效回复" in result

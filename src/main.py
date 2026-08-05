@@ -229,11 +229,24 @@ app.include_router(chat_ws.router, tags=["WebSocket"])
 
 if __name__ == "__main__":
     import uvicorn
+    from pathlib import Path
+
+    # 不排除 WORKSPACE_ROOT 的话，沙箱工具（write_file/run_python 等，见
+    # agent_core/tools/sandbox_tool.py）往里面写的每一个 .py 文件都会被
+    # uvicorn 的 reload watcher 当成"源码变更"，立刻重启进程、强制断开正在
+    # 进行中的 WebSocket 连接——现象是"工具调用明明成功了，但整个回复卡在
+    # 那不动"，因为连接在 reload 那一刻直接被服务端切断，不是业务逻辑卡死。
+    # uvicorn 的 `FileFilter` 只用字面量 `Path(e) in path.parents` 做目录级
+    # 排除判断（见 `uvicorn/supervisors/watchfilesreload.py`），不会自动
+    # `resolve()`；传相对路径会因为跟 watchfiles 回调的绝对路径对不上而
+    # 排除失效，必须传解析后的绝对路径。
+    workspace_root_exclude = str(Path(settings.WORKSPACE_ROOT).resolve())
 
     uvicorn.run(
         "src.main:app",
         host="0.0.0.0",
         port=8080,
         reload=True,
+        reload_excludes=[workspace_root_exclude],
         log_level=None,
     )

@@ -25,7 +25,7 @@ async def test_retries_once_when_datasource_configured_but_not_delegated() -> No
 
     first_response = ModelResponse(result=[AIMessage(content="好的，我看看")])
     second_response = ModelResponse(result=[AIMessage(
-        content="", tool_calls=[{"name": "delegate_to_database_agent", "args": {"task": "查销量"}, "id": "call-1"}],
+        content="", tool_calls=[{"name": "query_database", "args": {"task": "查销量"}, "id": "call-1"}],
     )])
     handler = AsyncMock(side_effect=[first_response, second_response])
 
@@ -34,7 +34,7 @@ async def test_retries_once_when_datasource_configured_but_not_delegated() -> No
     assert handler.await_count == 2
     retried_request = handler.await_args_list[1].args[0]
     assert retried_request.messages == request.messages
-    assert "delegate_to_database_agent" in retried_request.system_prompt
+    assert "query_database" in retried_request.system_prompt
     assert result is second_response
 
 
@@ -43,7 +43,7 @@ async def test_no_retry_when_model_already_delegates() -> None:
     request = _make_request(datasource_id="5", messages=[HumanMessage(content="查一下上个月的销量")])
 
     response = ModelResponse(result=[AIMessage(
-        content="", tool_calls=[{"name": "delegate_to_database_agent", "args": {}, "id": "call-1"}],
+        content="", tool_calls=[{"name": "query_database", "args": {}, "id": "call-1"}],
     )])
     handler = AsyncMock(return_value=response)
 

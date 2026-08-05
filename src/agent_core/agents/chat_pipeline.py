@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from loguru import logger
 
@@ -36,9 +36,7 @@ _TOOL_TYPE_MAP: dict[str, str] = {
     "search_knowledge_base": "knowledge_base",
     "save_memory": "memory",
     "recall_memory": "memory",
-    "delegate_to_rag_agent": "delegate",
-    "delegate_to_web_search_agent": "delegate",
-    "delegate_to_database_agent": "delegate",
+    "task": "delegate",
 }
 
 _REF_START = "<ref_json>"
@@ -245,6 +243,26 @@ async def run_chat_turn(
         config=config, context=context, stream_mode=["messages", "custom"],
     ):
         if stream_mode == "custom":
+            if isinstance(chunk, dict) and "tool_call_pending" in chunk:
+                # 参数还没拼完时提前广播的"仅名字"标记，见该中间件的说明——
+                # 只用来让前端提前弹一张 pending 卡片，不落 `result.tool_call_records`
+                # （完整数据等下面 `tool_calls` 分支的正式事件到达时才落）。
+                tool_event = _handle_tool_call_pending(chunk["tool_call_pending"])
+                if tool_event is not None:
+                    yield tool_event
+                continue
+            if isinstance(chunk, dict) and "tool_calls" in chunk:
+                # `StreamingModelMiddleware` 在拿到完整 `final_message` 后补发的
+                # 一次性标记，携带已经解析完整的 `tool_calls`——`stream_mode=
+                # "messages"` 通道里的 `AIMessage.tool_calls` 是跨多个增量 chunk
+                # 拼出来的半成品（参数越长，中途看到的空/野值越多，是曾经"任务
+                # 卡在写文件这一步不动"的根因，见该中间件的说明），不能再信任
+                # 那条通道来触发 `tool_call` 事件，只信这里。
+                for tool_call in chunk["tool_calls"]:
+                    tool_event = _handle_tool_call_start(tool_call, emitter, result)
+                    if tool_event is not None:
+                        yield tool_event
+                continue
             # `StreamingModelMiddleware` 逐 token 推送的增量 `AIMessageChunk`——
             # 真正的打字机效果来源，见该模块说明。
             for text_event in _handle_ai_message(chunk, emitter, thinking, ref_state, result):
@@ -253,15 +271,7 @@ async def run_chat_turn(
 
         msg_chunk, _metadata = chunk
 
-        if isinstance(msg_chunk, AIMessage):
-            # 这里的完整 `AIMessage` 只用来读 `tool_calls`——正文内容已经在上面
-            # 的 "custom" 分支里逐块转发过了，不再重复处理，避免文字重复两遍。
-            for tool_call in msg_chunk.tool_calls or []:
-                tool_event = _handle_tool_call_start(tool_call, emitter, result)
-                if tool_event is not None:
-                    yield tool_event
-
-        elif isinstance(msg_chunk, ToolMessage):
+        if isinstance(msg_chunk, ToolMessage):
             tool_event = _handle_tool_message(msg_chunk, emitter, fallback_sources, result)
             if tool_event is not None:
                 yield tool_event
@@ -286,6 +296,36 @@ async def run_chat_turn(
     if final_sources:
         result.references = final_sources
         yield {"type": "reference", "content": {"title": "参考文献", "sources": final_sources}}
+
+
+def _handle_tool_call_pending(pending: dict) -> Optional[dict]:
+    """处理 `StreamingModelMiddleware` 提前广播的"仅工具名"标记。
+
+    Args:
+        pending: `{"id": ..., "name": ...}`，工具调用参数还没流完时就已知的
+            那部分（见该中间件对 `tool_call_chunks` 的说明）。
+
+    Returns:
+        要推给前端的 pending `tool_call`/`skill_call` 消息（`tool_args` 恒为
+        `None`，`content.pending` 恒为 `True`，跟随后到达的正式事件区分开）；
+        工具名在过滤名单里或者信息不全时返回 `None`（不埋点、不落
+        `result.tool_call_records`——那是正式事件的职责，这里只是提前预告）。
+    """
+    tool_name, request_id = pending.get("name", ""), pending.get("id", "")
+    if not tool_name or not request_id or tool_filter_registry.is_filtered(tool_name):
+        return None
+
+    is_skill = _is_skill(tool_name)
+    return {
+        "type": "skill_call" if is_skill else "tool_call",
+        "content": {
+            "tool_name": tool_name,
+            "tool_args": None,
+            "request_id": request_id,
+            "tool_type": "skill" if is_skill else _tool_type(tool_name),
+            "pending": True,
+        },
+    }
 
 
 def _handle_tool_call_start(

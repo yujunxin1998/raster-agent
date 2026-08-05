@@ -16,7 +16,7 @@ class PromptTemplate:
     """一条提示词模板。
 
     Attributes:
-        name: 模板标识，全大写，与 SKILL.md 文件名对应（如 SUPERVISOR、
+        name: 模板标识，全大写，与文件名对应（如 TITLE_GENERATION、
             RAG_QUERY_REWRITE）。
         content: 模板正文，可能包含 `{variable}` 形式的占位符。
         source: 相对项目根目录的来源路径，便于排查"这条提示词到底改的哪个文件"。

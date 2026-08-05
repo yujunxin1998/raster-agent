@@ -78,13 +78,29 @@ class StreamingModelMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
 
         stream_writer = request.runtime.stream_writer
 
-        final_chunk: AIMessageChunk | None = None
-        async for chunk in bound_model.astream(messages):
+        def _write(payload: Any) -> None:
             token = var_child_runnable_config.set(_STREAM_WRITER_CONFIG)
             try:
-                stream_writer(chunk)
+                stream_writer(payload)
             finally:
                 var_child_runnable_config.reset(token)
+
+        final_chunk: AIMessageChunk | None = None
+        announced_tool_call_ids: set[str] = set()
+        async for chunk in bound_model.astream(messages):
+            _write(chunk)
+            # `tool_call_chunks` 是原始增量字段（跟下面 `tool_calls` property 那种
+            # "尝试解析半截 JSON"不是一回事），`id`/`name` 按 OpenAI 系流式协议
+            # 只在该工具调用的第一个 chunk 里出现一次，后续几块只补 `args` 的
+            # 片段——用它可以在参数还没拼完之前就提前广播"某个工具调用已经开始，
+            # 名字是什么"，让前端能立刻弹出一张 pending 卡片，不用死等参数全部
+            # 流完（`write_file` 的 `content` 可能要好几百个 token 才流完，
+            # 期间前端如果什么反馈都没有，观感上会像是"文字说完了但卡在原地"）。
+            for raw_call in chunk.tool_call_chunks or []:
+                call_id, name = raw_call.get("id"), raw_call.get("name")
+                if call_id and name and call_id not in announced_tool_call_ids:
+                    announced_tool_call_ids.add(call_id)
+                    _write({"tool_call_pending": {"id": call_id, "name": name}})
             final_chunk = chunk if final_chunk is None else final_chunk + chunk
 
         if final_chunk is None:
@@ -99,4 +115,22 @@ class StreamingModelMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
             response_metadata=final_chunk.response_metadata,
             id=final_chunk.id,
         )
+
+        if final_message.tool_calls:
+            # 见 `_STREAM_WRITER_CONFIG` 上方的说明：`stream_mode="messages"` 通道
+            # 里的 `AIMessageChunk` 是 LangChain 给模型 `.astream()` 自动挂的回调
+            # 副产物，跟上面手动推的 "custom" 通道是两条独立链路，一样是逐块到达
+            # 的增量——`tool_calls` 字段在参数较长（如本工程 write_file 的
+            # content）时会跨好几个 chunk 才拼完整，中途每个 chunk 的
+            # `tool_calls` 都是尝试解析半截 JSON 的产物（`name` 只在第一块出现，
+            # 之后几块 `name=""`/`id=None`，`args` 在拼完之前恒为 `{}`）。
+            # `chat_pipeline.py` 曾经直接读这个通道的 `tool_calls` 来生成
+            # `tool_call` 事件，参数越长，推给前端的半成品事件越多，是"任务
+            # 卡在写文件这一步不动"这个问题的真实根因（前端拿到
+            # `request_id=None` 的野事件后状态没法收尾）。这里改成只在本函数
+            # 已经拿到完整 `final_message` 之后，把解析好的 `tool_calls` 通过
+            # 同一个 stream_writer 补发一次——`chat_pipeline.py` 改为只信这里
+            # 发的、不再信 "messages" 通道的 `tool_calls`。
+            _write({"tool_calls": final_message.tool_calls})
+
         return ModelResponse(result=[final_message])

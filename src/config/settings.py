@@ -117,6 +117,19 @@ class SystemConfiguration(BaseSettings):
     ECHART_API_URL: str = os.getenv("ECHART_API_URL", "http://192.168.80.60:8888/api/ask-data/echarts/generate")
     ECHART_API_TIMEOUT: int = int(os.getenv("ECHART_API_TIMEOUT", "30"))
 
+    # ================ RAG 检索（search_knowledge_base 技能，新增） ===
+    RAG_API_URL: str = os.getenv("RAG_API_URL", "")
+    RAG_DB_ID: str = os.getenv("RAG_DB_ID", "0")
+    RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "1024"))
+    RAG_PAGE: int = int(os.getenv("RAG_PAGE", "1"))
+    RAG_PAGE_SIZE: int = int(os.getenv("RAG_PAGE_SIZE", "10"))
+    RAG_SCORE_THRESHOLD: float = float(os.getenv("RAG_SCORE_THRESHOLD", "0.0"))
+    RAG_VECTOR_SIMILARITY_WEIGHT: float = float(os.getenv("RAG_VECTOR_SIMILARITY_WEIGHT", "0.8"))
+    RAG_QUERY_REWRITE_ENABLED: bool = os.getenv("RAG_QUERY_REWRITE_ENABLED", "true").lower() == "true"
+    RAG_QUERY_REWRITE_MAX_TOKENS: int = int(os.getenv("RAG_QUERY_REWRITE_MAX_TOKENS", "256"))
+    RAG_QUERY_REWRITE_TIMEOUT: float = float(os.getenv("RAG_QUERY_REWRITE_TIMEOUT", "15.0"))
+    RAG_QUERY_REWRITE_HISTORY_TURNS: int = int(os.getenv("RAG_QUERY_REWRITE_HISTORY_TURNS", "3"))
+
     # ================ Redis（Eval 遥测，新增） =====================
     # 留空即禁用 Eval 遥测（emitter/middleware 内部静默降级，不影响主流程）。
     REDIS_URL: str = os.getenv("REDIS_URL", "")

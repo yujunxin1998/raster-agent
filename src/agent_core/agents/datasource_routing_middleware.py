@@ -3,13 +3,19 @@
 原项目里"配置了 datasource_id 必须先路由到 database_agent"这条规则完全靠
 prompt 里的一段文案约束（`supervisor.md`"强制约束"一节），模型不遵守也没有
 兜底。这里把它升级成代码层面的硬拦截：本轮第一次模型响应时，如果
-`datasource_id` 已配置但模型的工具调用里没有 `delegate_to_database_agent`，
-注入一条纠正性 SystemMessage 强制重试一次；不管第二次结果如何都放行，避免
-死循环——这是"软提示（prompt）+ 硬拦截（本中间件）"两层防线里的第二层。
+`datasource_id` 已配置但模型的工具调用里没有 `query_database`，注入一条
+纠正性 SystemMessage 强制重试一次；不管第二次结果如何都放行，避免死循环——
+这是"软提示（prompt）+ 硬拦截（本中间件）"两层防线里的第二层。
+
+`query_database` 曾经是委派工具 `delegate_to_database_agent`（把整个查询能力包在
+一个子 Agent 里），现在是直接挂在 Lead Agent 工具集上的 `skills/core/
+query-database/` 技能，工具名字面量随之改成技能的 `tool_name`——两边必须完全
+一致，否则这层硬校验会静默失效（模型明明调用了 `query_database`，中间件却因为
+比对的还是旧名字而认为"没调用"，一直重试）。
 
 不属于 `agent_core/middlewares/` 里那 11 个通用中间件——这是 Lead Agent 的
-专属业务规则（知道 `delegate_to_database_agent` 这个具体工具名），随
-`lead_agent.py` 的中间件列表追加，不进 `agent_core/loop.py::build_middlewares()`。
+专属业务规则（知道 `query_database` 这个具体工具名），随 `lead_agent.py` 的
+中间件列表追加，不进 `agent_core/loop.py::build_middlewares()`。
 """
 from __future__ import annotations
 
@@ -21,7 +27,7 @@ from loguru import logger
 
 from src.agent_core.middlewares.context import AgentRuntimeContext
 
-_DATABASE_DELEGATE_TOOL_NAME = "delegate_to_database_agent"
+_DATABASE_DELEGATE_TOOL_NAME = "query_database"
 _CORRECTION_MESSAGE = (
     f"检测到当前请求已配置数据源（datasource_id），本轮必须先调用 "
     f"{_DATABASE_DELEGATE_TOOL_NAME} 完成查询，不得跳过、不得先做其他事情。"
@@ -43,7 +49,7 @@ def _is_first_response_this_turn(messages: list) -> bool:
 
 
 def _has_database_delegate_call(result: list) -> bool:
-    """判断模型这次响应的工具调用里是否包含 `delegate_to_database_agent`。"""
+    """判断模型这次响应的工具调用里是否包含 `query_database`。"""
     return any(
         isinstance(message, AIMessage)
         and any(tool_call["name"] == _DATABASE_DELEGATE_TOOL_NAME for tool_call in (message.tool_calls or []))

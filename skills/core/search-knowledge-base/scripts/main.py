@@ -38,11 +38,10 @@ _PROJECT_ROOT = os.path.dirname(  # diit-agent-server/
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src.env_utils import SystemConfiguration  # noqa: E402
-from src.service.rag_query_rewrite_service import RAGQueryRewriteService  # noqa: E402
-from src.service.rag_service import RAGService  # noqa: E402
+from src.agent_core.tools.rag_service import RAGQueryRewriteService, RAGService  # noqa: E402
+from src.config.settings import get_settings  # noqa: E402
 
-settings = SystemConfiguration()
+settings = get_settings()
 
 
 async def _run(params: dict) -> dict:

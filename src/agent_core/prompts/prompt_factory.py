@@ -8,14 +8,18 @@
 
 `PromptFactory` 把"渲染"这个动作收口成一个方法：`render(name, **variables)`，
 渲染失败时统一转换成 `PromptRenderError`（带清晰的模板名 + 缺失变量名），
-比裸 `KeyError` 更容易定位问题；不需要变量的静态模板（如 `SUPERVISOR`、
-`GENERAL_AGENT`）直接调用 `get(name)` 取原文即可，无需关心是否要渲染。
+比裸 `KeyError` 更容易定位问题；不需要变量的静态模板（如 `TITLE_GENERATION`）
+直接调用 `get(name)` 取原文即可，无需关心是否要渲染。
+
+本类只管 `templates/` 下的"提示词模板"；驱动 Agent 工具循环的"系统提示词"走
+`system_prompt_builder.SystemPromptBuilder`，两者不共用同一套查找机制，见
+`agent_core/prompts/__init__.py` 顶部说明。
 
 用法::
 
     from src.agent_core.prompts import prompt_factory
 
-    prompt_factory.get("SUPERVISOR")                     # 静态模板，原样返回
+    prompt_factory.get("TITLE_GENERATION")               # 静态模板，原样返回
     prompt_factory.render(
         "RAG_QUERY_REWRITE",
         history_text=history, tool_query=tool_query, user_query=user_query,
@@ -46,8 +50,8 @@ class PromptFactory:
     def get(self, name: str) -> str:
         """取一个模板的原始正文，不做任何渲染。
 
-        适用于没有 `{variable}` 占位符的静态提示词（如 `SUPERVISOR`、
-        `GENERAL_AGENT`），也适用于调用方希望自己控制拼接逻辑的场景。
+        适用于没有 `{variable}` 占位符的静态提示词（如 `TITLE_GENERATION`），
+        也适用于调用方希望自己控制拼接逻辑的场景。
 
         Args:
             name: 模板名称，大小写不敏感。

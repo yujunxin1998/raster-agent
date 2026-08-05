@@ -1,7 +1,7 @@
 """提示词注册表（内存索引）。
 
 与原项目 `src/core/prompts/registry.py::PromptRegistry` 的差异：去掉了原实现
-里 `__getattr__` 的属性式动态访问（`prompts.SUPERVISOR`）。这种"魔法属性"
+里 `__getattr__` 的属性式动态访问（`prompts.TITLE_GENERATION`）。这种"魔法属性"
 访问方式对 IDE 补全、静态类型检查都不友好，也和"方法调用应当显式"的
 代码规范相悖；改为统一走 `get()`/`get_content()` 显式方法，语义更清晰，
 配合 `PromptFactory` 使用体验上并不会更啰嗦。

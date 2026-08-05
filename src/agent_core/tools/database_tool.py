@@ -1,25 +1,23 @@
-"""数据库自然语言查询：调用外部 ask-db-service 完成查询，多行结果时附加 ECharts 图表。
+"""数据库自然语言查询的服务层：调用外部 ask-db-service 完成查询，多行结果时附加
+ECharts 图表。`DatabaseQueryService` 本身不是工具入口——真正暴露给 Lead Agent 的是
+`skills/core/query-database/` 技能（`scripts/main.py` 导入本模块的
+`DatabaseQueryService`/`_get_db_service`/`_DATASOURCE_NOT_CONFIGURED_MESSAGE`
+编排一次完整查询），本文件只保留可复用的服务类。
 
-原样迁移自 `diit-agent-server` 的 `src/service/db_query_service.py` +
-`src/core/tools/database_tool.py`（原项目拆成两个文件，本仓库参照
-`web_search_tool.py`"一个薄 `@tool` 函数 + 一个客户端类同放一个文件"的既有
-约定合并成一个文件）。核心改动只有两处：`LLMFactory.get_llm(...)` 换成
-`create_chat_model(...)`；`prompts.XXX.format_map(...)` 换成
-`prompt_factory.render("XXX", ...)`——`DB_ANALYSIS`/`DB_ANALYSIS_SYSTEM`/
-`DATA_INTERPRETATION`/`DATA_INTERPRETATION_SYSTEM`/`CHART_METADATA_GENERATION`/
-`CHART_METADATA_SYSTEM` 六条提示词已经在第一期随 prompts 模块迁移过来，
-未改动内容。
+原样迁移自 `diit-agent-server` 的 `src/service/db_query_service.py`。核心改动只有
+两处：`LLMFactory.get_llm(...)` 换成 `create_chat_model(...)`；
+`prompts.XXX.format_map(...)` 换成 `prompt_factory.render("XXX", ...)`——
+`DB_ANALYSIS`/`DB_ANALYSIS_SYSTEM`/`DATA_INTERPRETATION`/`DATA_INTERPRETATION_SYSTEM`/
+`CHART_METADATA_GENERATION`/`CHART_METADATA_SYSTEM` 六条提示词已经在第一期随 prompts
+模块迁移过来，未改动内容。
 """
 from __future__ import annotations
 
 import json
-import uuid
 from typing import Any
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import tool
 from loguru import logger
 
 from src.agent_core.model import create_chat_model
@@ -225,73 +223,3 @@ def _get_db_service() -> DatabaseQueryService:
     if _db_service is None:
         _db_service = DatabaseQueryService()
     return _db_service
-
-
-@tool
-async def query_database(query_text: str, config: RunnableConfig) -> str:
-    """查询数据库并生成结构化结果（表格、图表、数据解读），适用于明确的数据统计、筛选、对比、排行类问题。
-
-    需要当前请求已配置数据源（datasource_id），否则无法执行。
-    """
-    datasource_id = config.get("configurable", {}).get("datasource_id")
-    if not datasource_id:
-        return _DATASOURCE_NOT_CONFIGURED_MESSAGE
-
-    try:
-        datasource_id = int(datasource_id)
-    except (TypeError, ValueError):
-        return f"datasource_id 格式不合法: {datasource_id!r}，无法执行数据库查询。"
-
-    db_service = _get_db_service()
-    work_flow_run_id = str(uuid.uuid4())
-
-    try:
-        step1_data = await db_service.execute_step1(query_text, datasource_id, work_flow_run_id)
-        query_result = step1_data.get("query_result", {})
-        row_count = query_result.get("row_count", 0)
-        data_markdown = query_result.get("data", "")
-        data_json = query_result.get("data_json", [])
-
-        conditions_xml = await db_service.generate_query_conditions_analysis(query_text, step1_data)
-        analysis_block = (
-            f"<analysis>\n{conditions_xml}\n"
-            f"<step label='数据解读'>\n基于\"{query_text}\"的返回结果，进行数据解读。\n</step>\n"
-            "</analysis>"
-        )
-
-        try:
-            step2_data = await db_service.execute_step2(work_flow_run_id)
-            interpretation = db_service.format_step2_output(step2_data)
-        except Exception as exc:
-            logger.error(f"[query_database] step2 failed, falling back to local interpretation: {exc}")
-            interpretation = await db_service.generate_data_interpretation(query_text, step1_data)
-
-        if row_count <= 1:
-            return f"{analysis_block}\n\n{data_markdown}\n\n{interpretation}"
-
-        try:
-            metadata = await db_service.generate_chart_metadata(query_text, step1_data)
-        except Exception as exc:
-            logger.error(f"[query_database] chart metadata generation failed, using fallback: {exc}")
-            metadata = ChartMetadata(table_title="查询结果", chart_title="数据分布", chart_type="bar")
-
-        try:
-            echart_config = await db_service.call_echart_api(data_json, metadata.chart_type, work_flow_run_id)
-        except Exception as exc:
-            logger.error(f"[query_database] echart generation failed, skipping chart: {exc}")
-            echart_config = None
-
-        if echart_config:
-            content = db_service.format_multi_row_output(
-                table_title=metadata.table_title, table_markdown=data_markdown,
-                chart_title=metadata.chart_title, chart_type=metadata.chart_type,
-                echart_config=echart_config, interpretation=interpretation,
-            )
-        else:
-            content = f"### {metadata.table_title}\n\n{data_markdown}\n\n{interpretation}"
-
-        return f"{analysis_block}\n\n{content}"
-
-    except Exception as exc:
-        logger.error(f"[query_database] failed: {exc}")
-        return f"数据库查询失败: {exc}"
