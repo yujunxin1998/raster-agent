@@ -6,14 +6,17 @@
 > 落地状态：第一期（skill / memory / tool / prompt 机制迁移 + guardrail / sandbox / workspace / 中间件流水线
 > 骨架 / `required_secrets`）已在本仓库（`raster-agent-server`）全部完成。第二期——4.1 节"Lead Agent +
 > 委派工具"——也已全部完成：`agent_core/agents/lead_agent.py` 用 `langchain.agents.create_agent` 组装 Lead
-> Agent，`agent_core/loop.py::build_middlewares()` 的 11 个中间件真正接入了这个 Agent；`rag_agent`/
-> `web_search_agent`/`database_agent` 改造成 `delegate_to_rag_agent`/`delegate_to_web_search_agent`/
-> `delegate_to_database_agent` 三个委派工具，`general_agent`/`tool_agent` 的工具直接并入 Lead Agent 自己的
-> 基础工具集（详见 4.1 节"落地说明"）；`datasource_id` 强制路由有了代码层面的硬校验
-> （`DatasourceRoutingMiddleware`）；Redis-based Eval 遥测（`agent_core/eval/`）已迁移（去掉了旧 Supervisor
-> 多节点图特有的"agent 切换检测"逻辑，简化为"Lead Agent 本轮"单一整体记录，见该模块 docstring 说明）；
-> `POST /chat/`（非流式）、`/conversations/*`、WebSocket `/ws/chat`（流式 + 前端工具双通道回环）均已可用。
-> 仍未迁移的是 `user_id` 身份认证、`DockerSandboxProvider` 等第三期事项，详见第七节。
+> Agent，`agent_core/loop.py::build_middlewares()` 的 11 个中间件真正接入了这个 Agent；路由方式后来又从
+> "三个固定委派工具"演进成了通用 `task(subagent_type, task)` 分发（`agent_core/agents/delegation_tools.py` +
+> `subagent_profiles.py` 注册表，取代早期的 `delegate_to_rag_agent`/`delegate_to_web_search_agent`/
+> `delegate_to_database_agent`）——目前只有 `web-researcher` 一种 subagent 走这套委派机制，
+> `search_knowledge_base`/`query_database` 落地成了 Lead Agent 自己的技能（不再是委派工具），
+> `general_agent`/`tool_agent` 的工具同样直接并入 Lead Agent 自己的基础工具集（详见 4.1 节"落地说明"）；
+> `datasource_id` 强制路由有了代码层面的硬校验（`DatasourceRoutingMiddleware`）；Redis-based Eval 遥测
+> （`agent_core/eval/`）已迁移（去掉了旧 Supervisor 多节点图特有的"agent 切换检测"逻辑，简化为"Lead Agent
+> 本轮"单一整体记录，见该模块 docstring 说明）；`POST /chat/`（非流式）、`/conversations/*`、WebSocket
+> `/ws/chat`（流式 + 前端工具双通道回环）均已可用。第三期的 `DockerSandboxProvider`/记忆 staleness 定期复核/
+> `outputs/` 产物下载链接/checkpoint 孤儿数据清理均已落地，唯一仍未迁移的是 `user_id` 身份认证，详见第七节。
 
 ---
 
@@ -41,9 +44,9 @@ DeerFlow（`bytedance/deer-flow`）是同样基于 LangGraph 的 harness，规�
 | `ThreadDataMiddleware` 给每个 thread 建立隔离目录 `users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`，工具里统一用虚拟路径 `/mnt/user-data/...` 访问，由 Sandbox 层做真实路径映射 | 我们的 `conversation_id` 天然就是 thread_id，直接复用这个粒度做隔离目录 | 第五节 5.2 |
 | `Sandbox` 抽象接口（`execute_command`/`read_file`/`write_file`/`list_dir`）+ `SandboxProvider`（Local/Docker/远程可插拔），本地模式零依赖，容器模式按需开启 | 我们不需要一上来就上 Docker/K8s，但接口要照这个形状设计，方便以后从"本地进程"平滑升级到"容器隔离" | 第五节 5.3 |
 | Skill 的"渐进式披露"再往前一步：`deferred_discovery` 模式下系统提示里只放技能名索引，Agent 主动调用 `describe_skill` 才拿到完整元数据，进一步省 prompt token；`required-secrets` 让技能声明自己需要哪些密钥，由调用方按请求传入，绝不进 prompt/日志/checkpoint | 我们现有的两级披露（frontmatter 目录 → 正文/脚本）已经是同一思路的简化版，暂不需要再加一层 `describe_skill`，但 `required-secrets` 这个"密钥按需注入、绝不落地"的设计值得直接抄，解决脚本技能要连外部系统时明文写 `.env` 的问题 | 第五节 5.4 |
-| `ReadBeforeWriteMiddleware`：写文件前必须先读过、且内容哈希没变过，否则拦截 | 防止 Agent 没看清文件当前内容就覆盖写，属于沙箱文件工具的标配安全网，成本很低 | 第五节 5.3 |
-| `SubagentExecutor` + `task()` 工具：Lead Agent 按需把子任务派给专用 subagent，而不是像 Supervisor 那样"每轮都必须回到主控节点重新决策" | 能显著减少路由跳转次数、降低 supervisor 决策失败（当前 `supervisor.py` 里大段代码在处理 DeepSeek JSON 输出退化、自然语言兜底解析）带来的不稳定性 | 第四节，作为二期演进方向，不在一期强制引入 |
-| 记忆模块的 staleness pass（老记忆定期复核是否该淘汰）、冲突检测 | 我们现有记忆模块已经有 `importance`/`status`（pending/active/archived）字段，补一个后台定期复核任务成本不高 | 列入第七节路线图二期，非本次核心范围 |
+| `ReadBeforeWriteMiddleware`：写文件前必须先读过、且内容哈希没变过，否则拦截 | 防止 Agent 没看清文件当前内容就覆盖写，属于沙箱文件工具的标配安全网，成本很低 | 第五节 5.3（尚未实现，仍是待办） |
+| `SubagentExecutor` + `task()` 工具：Lead Agent 按需把子任务派给专用 subagent，而不是像 Supervisor 那样"每轮都必须回到主控节点重新决策" | 能显著减少路由跳转次数、降低 supervisor 决策失败（当前 `supervisor.py` 里大段代码在处理 DeepSeek JSON 输出退化、自然语言兜底解析）带来的不稳定性 | 第四节（已落地为 `delegation_tools.py::build_task_tool()` + `subagent_profiles.py`） |
+| 记忆模块的 staleness pass（老记忆定期复核是否该淘汰）、冲突检测 | 我们现有记忆模块已经有 `importance`/`status`（pending/active/archived）字段，补一个后台定期复核任务成本不高 | staleness pass 已落地（`memory_staleness_reviewer.py`，见第七节路线图第三期）；冲突检测本次未覆盖，仍是待办 |
 
 **不抄的部分**：DeerFlow 的多渠道接入（Feishu/Slack/Discord/GitHub webhook）、K8s Provisioner、BoxLite micro-VM、`.skill` ZIP 安装市场——这些是它作为通用开源产品要覆盖的场景，我们是单一业务系统，不需要这个复杂度。抄的是"骨架形状"，不是"全部功能"。
 
@@ -114,17 +117,24 @@ Prompt 机制不依赖数据库/沙箱/权限等基础设施，因此和原项�
 
 `tool_agent`（承载前端 `extra_tools`）也同理：不再是 supervisor 图上的独立节点，而是 Lead Agent 工具集里按请求动态 merge 进来的一部分（这一点和现在 `tool_agent.py::_dispatch()` 里"每次请求都要重新 `create_react_agent`"的实现方式是一致的，不需要改，只是不再需要专门用一个图节点去承载它）。
 
-> **落地说明**（第二期第一轮）：`agent_core/agents/lead_agent.py::build_lead_agent()` 用本仓库
+> **落地说明**（第二期，已演进两轮）：`agent_core/agents/lead_agent.py::build_lead_agent()` 用本仓库
 > `langchain==1.3.9` 自带的 `langchain.agents.create_agent`（不是原项目的 `create_react_agent`）
 > 组装 Lead Agent，`middleware=build_middlewares(...)` 直接把第一期的 11 个中间件接进这个 Agent。
-> 委派工具只做了 `delegate_to_rag_agent`/`delegate_to_web_search_agent` 两个（`agent_core/agents/
-> delegation_tools.py` + `sub_agent_factory.py`）——`general_agent`（`save_memory`/`recall_memory` +
-> skill 分类 `general`）与 `tool_agent`（skill 分类 `tool` + 前端 `extra_tools`）的工具**直接并入
-> Lead Agent 自己的基础工具集**，不设对应的委派工具，因为这两者和"Lead Agent 自己直接处理"没有
-> 本质区别，符合本节"简单问题不需要转一圈"的初衷。`delegate_to_database_agent` 依赖的
-> `db_query_service.py`/ECharts 集成本轮未迁移，推迟到下一轮；`datasource_id` 强制路由的 Guardrail
-> 硬校验（本节第三条）同样推迟，本轮 `datasource_id` 只作为 `AgentRuntimeContext` 透传。
-> `thinking_enabled` 运行时配置、`tool_agent` 工具直接合并这两点均已按本节设计落地。
+> 第一轮先做了 `delegate_to_rag_agent`/`delegate_to_web_search_agent` 两个固定委派工具；第二轮把这套
+> "每个能力一个固定工具名"的设计换成了通用 `task(subagent_type, task)` 分发（`agent_core/agents/
+> delegation_tools.py::build_task_tool()` + `subagent_profiles.py` 注册表），对应 DeerFlow 的 `task()`
+> 工具思路——新增一个专用能力只需要在 `subagent_profiles.py` 的 `_PROFILES` 里加一条 `SubagentProfile`，
+> 不需要再写一遍"新建 builder 函数 + 接进 `lead_agent.py` 的 `base_tools` + 写新提示词"。目前
+> `_PROFILES` 里只注册了 `web-researcher` 一种（对应原来的 `delegate_to_web_search_agent`）；
+> `rag_agent`（原 `delegate_to_rag_agent`）与 `database_agent`（原计划的 `delegate_to_database_agent`）
+> 都不再走委派机制，改造成 Lead Agent 自己的技能——`search_knowledge_base`/`query_database`（技能分类
+> `rag`/`database`），`db_query_service.py`/ECharts 集成也已随 `query_database` 技能落地。`general_agent`
+> （`save_memory`/`recall_memory` + skill 分类 `general`）与 `tool_agent`（skill 分类 `tool` + 前端
+> `extra_tools`）的工具**直接并入 Lead Agent 自己的基础工具集**，不设对应的委派工具，因为这两者和
+> "Lead Agent 自己直接处理"没有本质区别，符合本节"简单问题不需要转一圈"的初衷。`datasource_id` 强制
+> 路由的硬校验已通过 `DatasourceRoutingMiddleware` 落地（检测到已配置数据源但模型第一步没调用
+> `query_database` 时注入纠正提示强制重试）。`thinking_enabled` 运行时配置、`tool_agent` 工具直接合并
+> 这两点同样已按本节设计落地。
 
 > **是否要一步做完**：这是本方案里改动面最大的一步，建议放在路线图第二期（见第七节），第一期先把中间件流水线骨架、权限、文件系统、沙箱做出来，Supervisor 的路由图先保留、只是把它包装成"Lead Agent 众多委派工具之一"的过渡态，降低一次性重构的风险。
 
@@ -199,6 +209,12 @@ class GuardrailProvider(Protocol):
 
 **生命周期**：`outputs/` 下的产物需要有对应的静态文件服务/下载接口暴露给前端（前端目前没有这类展示位，需要和 `MessageItem.vue` 配合新增，这一点超出"零改动 web"的约束，需要和前端团队单独沟通，不在本次后端方案强制范围内，先按"生成 URL 挂进现有 Markdown 正文"的方式兼容，类似现在 `database_agent` 返回的 `<echart>` 图表块）。
 
+> **落地说明**（第三期）：已实现。新增 `save_output_file` 工具（`agent_core/tools/sandbox_tool.py`），
+> 把内容写入 `outputs/` 目录并返回一条相对路径下载链接；`conversation_router.py` 新增
+> `GET /conversations/{conversation_id}/outputs/{file_path}` 接口，按 `user_id` 做 owner 校验后用
+> `FileResponse` 返回文件——完全按本节设想的"生成 URL 挂进 Markdown 正文"方式落地，没有新增
+> `PUBLIC_BASE_URL` 之类的配置，也不需要前端改动。
+
 ### 5.3 沙箱（Sandbox 执行环境）
 
 **目标**：技能脚本、未来的代码执行类工具，统一经过这一层执行，取代裸 `subprocess.Popen`。
@@ -225,7 +241,20 @@ class SandboxProvider(Protocol):
 
 **二期预留 `DockerSandboxProvider`**：接口不变，只是 `execute_command` 内部换成往容器里下发命令。当业务上出现"需要跑不受信任的用户自定义代码"这类场景时再启用，一期不做，因为当前 23 个技能里真正需要执行的是"项目自己写的脚本"，不是"用户上传的任意代码"，风险等级不一样，没必要一开始就上容器化的复杂度。
 
+> **落地说明**（第三期）：已实现。`agent_core/sandbox/docker_sandbox.py` + `docker_sandbox_provider.py`，
+> `SANDBOX_PROVIDER=docker` 时启用。只有 `execute_command` 真正起容器（一次性 `--rm` 语义，用完即删），
+> `read_file`/`write_file`/`list_dir` 委托给内部组合的 `LocalSandbox` 复用（文件操作本质是宿主机文件
+> 系统操作，不需要容器隔离）；命令里的 `sys.executable`（宿主机解释器路径）会被翻译成容器内的
+> `python3`，技能脚本用到的项目内绝对路径也会被翻译成容器内的等价路径（项目根目录只读挂载到
+> `/app`）。已知限制：默认镜像 `python:3.11-slim` 不含 Node.js，涉及 `.js` 脚本的技能需要换镜像；
+> 暂不支持 `execute_command(stdin=...)` 管道输入（`SkillContentReader` 传 JSON 参数给脚本用到这个），
+> 需要用到 stdin 的场景请继续用 `SANDBOX_PROVIDER=local`。
+
 **`ReadBeforeWriteMiddleware`（可选，性价比高，建议一期就做）**：`write_file`/`str_replace` 类工具执行前，校验该路径是不是刚被 `read_file` 读过且内容哈希没变，否则拦截并提示"请先读取该文件当前内容"。这条防护成本很低（一个内存里的 path→hash 映射），能有效防止 Agent 在没看清文件当前内容的情况下盲写覆盖。
+
+> **现状**：尚未实现，`middlewares/` 目录下没有这个文件，`write_file` 目前可以在没有先 `read_file`
+> 的情况下直接覆盖写。本轮第三期任务未覆盖这一项（用户明确点的是 `DockerSandboxProvider`/staleness/
+> outputs 下载/checkpoint 清理这四项），仍是待办。
 
 ### 5.4 技能脚本的密钥声明（`required_secrets`）
 
@@ -270,7 +299,7 @@ diit-agent-server/
 
 `api`/`service` 层是"App 层"，`agent_core` 是"Harness 层"——这个切分对应第二节表格里 DeerFlow "harness 与 app 严格分层、依赖方向单向"的做法，好处是 `agent_core` 未来具备独立测试、甚至被其它入口（比如批处理脚本、IM 渠道）复用的可能性，而不必每次都套一层 FastAPI。
 
-> **实际落地说明**：`raster-agent-server` 仓库已按此思路建工程（`api/` → `agent_core/`+`storage/` → `schema/`，依赖方向单向），`agent_core/` 下 guardrail/sandbox/workspace/skills/memory/tools/prompts 七个子模块、`loop.py`/`middlewares/` 中间件流水线、`model/`（LLM 工厂）、`agents/`（Lead Agent + 委派工具，取代原方案里"5 个专用能力"的提法——只做了 rag/web_search 两个委派工具，`general_agent`/`tool_agent` 并入 Lead Agent 基础工具集，`database_agent` 推迟）均已落地。仍未迁移的是 `service/`（`chat_service.py` 的 WS 部分）与 WebSocket 层，`api/router/` 新增了 `chat_router.py`（非流式 `POST /chat/`）与 `conversation_router.py`，取代了原方案里"service 变薄，只保留调用 loop + 落库"的定位——本仓库直接在 router 层做这件事，没有再单独设 `service/` 目录，因为中间件已经把大部分横切逻辑接管了，router 层剩下的编排代码本身已经很薄。
+> **实际落地说明**：`raster-agent-server` 仓库已按此思路建工程（`api/` → `agent_core/`+`storage/` → `schema/`，依赖方向单向），`agent_core/` 下 guardrail/sandbox/workspace/skills/memory/tools/prompts 七个子模块、`loop.py`/`middlewares/` 中间件流水线、`model/`（LLM 工厂）、`agents/`（Lead Agent + 通用 `task()` 分发，取代原方案里"5 个专用能力"的提法——只有 `web-researcher` 一种 subagent 走委派，`rag`/`database` 落地为 Lead Agent 自己的技能，`general_agent`/`tool_agent` 并入 Lead Agent 基础工具集）均已落地。仍未迁移的是 `service/`（`chat_service.py` 的 WS 部分）与 WebSocket 层，`api/router/` 新增了 `chat_router.py`（非流式 `POST /chat/`）与 `conversation_router.py`，取代了原方案里"service 变薄，只保留调用 loop + 落库"的定位——本仓库直接在 router 层做这件事，没有再单独设 `service/` 目录，因为中间件已经把大部分横切逻辑接管了，router 层剩下的编排代码本身已经很薄。
 
 ---
 
@@ -279,8 +308,8 @@ diit-agent-server/
 | 期 | 范围 | 对 Web 的影响 | 落地状态 |
 |---|---|---|---|
 | **第一期** | 中间件流水线骨架落地（第四节 4.2 的 11 个中间件，先不改路由方式，Supervisor 图原样保留）；权限控制（5.1）；虚拟工作区 + LocalSandboxProvider（5.2、5.3）；技能脚本执行迁移到 Sandbox 后执行；`required_secrets` | 零影响，REST/WS 契约不变 | 全部落地：权限控制、虚拟工作区、LocalSandboxProvider、技能脚本沙箱化、`required_secrets`、中间件流水线骨架（`agent_core/loop.py` + `agent_core/middlewares/`）均已在 `raster-agent-server` 完成，第一期收尾 |
-| **第二期** | Supervisor 多图路由 → Lead Agent + 委派工具（4.1，含 `delegate_to_database_agent`）；`create_agent` 组装 + 中间件真正接入；`thinking_agent`/`tool_agent` 收敛为 Lead Agent 运行时配置/基础工具集；`datasource_id` 强制路由硬校验；Redis-based Eval 遥测；REST `POST /chat/` + `/conversations/*` + WebSocket `/ws/chat` 流式协议 + 前端工具双通道回环 | REST/WS 均新增，不改现有 `/skills`/`/memories` 契约 | 全部完成：`agent_core/model/`（LLM 工厂）、`agent_core/agents/`（Lead Agent + 三个委派工具 + `DatasourceRoutingMiddleware`）、`agent_core/eval/`（Redis Eval 遥测）、`storage/conversation_store.py`/`message_store.py`、`api/router/chat_router.py`/`conversation_router.py`、`api/websocket/`（`connection_manager.py`/`chat_ws.py`）均已落地并通过单测。`delegate_to_database_agent` 依赖的外部 ask-db-service/ECharts 服务在当前开发环境不可达，是已知限制，不影响代码结构完整性 |
-| **第三期（按需）** | `user_id` 身份认证接入（配合 Guardrail 才有实际意义）；`DockerSandboxProvider`；记忆 staleness 定期复核；`outputs/` 产物的下载链接前端展示（需要前端配合，超出本次范围）；`conversation_store.cleanup_langgraph_checkpoint_tables` 孤儿 checkpoint 清理 | 第三项需要前端小改动，其余零影响 | 未开始 |
+| **第二期** | Supervisor 多图路由 → Lead Agent + 通用 `task()` 分发（4.1）；`create_agent` 组装 + 中间件真正接入；`thinking_agent`/`tool_agent` 收敛为 Lead Agent 运行时配置/基础工具集；`datasource_id` 强制路由硬校验；Redis-based Eval 遥测；REST `POST /chat/` + `/conversations/*` + WebSocket `/ws/chat` 流式协议 + 前端工具双通道回环 | REST/WS 均新增，不改现有 `/skills`/`/memories` 契约 | 全部完成：`agent_core/model/`（LLM 工厂）、`agent_core/agents/`（Lead Agent + `task(subagent_type, task)` 通用分发 + `DatasourceRoutingMiddleware`，只注册了 `web-researcher` 一种 subagent，`rag`/`database` 落地为 `search_knowledge_base`/`query_database` 两个技能而非委派工具）、`agent_core/eval/`（Redis Eval 遥测）、`storage/conversation_store.py`/`message_store.py`、`api/router/chat_router.py`/`conversation_router.py`、`api/websocket/`（`connection_manager.py`/`chat_ws.py`）均已落地并通过单测 |
+| **第三期（按需）** | `user_id` 身份认证接入（配合 Guardrail 才有实际意义）；`DockerSandboxProvider`；记忆 staleness 定期复核；`outputs/` 产物的下载链接；`checkpoint` 孤儿数据清理 | 后四项零影响（下载链接按"生成 URL 挂进 Markdown 正文"方式兼容，不需要前端改动） | `DockerSandboxProvider`（`agent_core/sandbox/docker_sandbox*.py`，`SANDBOX_PROVIDER=docker` 时启用）、记忆 staleness 定期复核（`agent_core/memory/memory_staleness_reviewer.py`）、`outputs/` 产物下载链接（`save_output_file` 工具 + `GET /conversations/{id}/outputs/{path}`）、checkpoint 孤儿数据清理（`storage/checkpoint_cleanup.py`，删除会话时立即清理 + `main.py` 后台维护循环兜底历史孤儿数据）均已完成；唯一仍未开始的是 `user_id` 身份认证 |
 
 第一期是本方案的核心交付物，能独立验证权限/文件系统/沙箱三块新能力，且完全不触碰现有路由逻辑，风险最低、收益最直接（补上安全性现状文档里点名的两个缺口：技能脚本无隔离、无工具级权限控制）。第二期验证了"完整 Agent Loop"意义上最核心的一步——Lead Agent + 委派工具跑通 REST 与 WebSocket 两条对话链路，是改动面最大的一轮，落地时把原项目 `chat_service.py` 里 REST/WS 两条路径的重复逻辑收敛成了一个共享的 `chat_pipeline.py::run_chat_turn()`，比原项目实现更精简。
 
