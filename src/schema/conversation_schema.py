@@ -72,3 +72,13 @@ class ConversationHistory(BaseModel):
 
     conversation_id: str
     messages: list[MessageItem]
+
+
+class FileItem(BaseModel):
+    """一条上传文件记录，字段与 `conversation_files` 表列一一对应。"""
+
+    id: str
+    original_name: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime

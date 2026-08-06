@@ -5,22 +5,27 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from pathlib import Path
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from src.agent_core.workspace import get_thread_workspace_manager
 from src.common.constants import WorkspaceDirectory
 from src.common.exceptions import PathTraversalError
 from src.common.response import ApiResponse, success
+from src.config.settings import get_settings
 from src.schema.conversation_schema import (
     ConversationCreate,
     ConversationHistory,
     ConversationResponse,
     ConversationUpdate,
+    FileItem,
     MessageItem,
 )
 from src.storage.checkpoint_cleanup import get_checkpoint_cleanup
 from src.storage.conversation_store import get_conversation_store
+from src.storage.file_store import get_file_store
 from src.storage.message_store import get_message_store
 from src.utils.uuid_utils import generate_uuid
 
@@ -28,6 +33,7 @@ router = APIRouter(prefix="/conversations")
 
 _NOT_FOUND_MESSAGE = "对话不存在或无权访问"
 _VISIBLE_MESSAGE_ROLES = ("user", "assistant")
+_FILE_NOT_FOUND_MESSAGE = "文件不存在或无权访问"
 
 
 @router.post("/", response_model=ApiResponse[ConversationResponse], summary="创建会话")
@@ -119,3 +125,83 @@ async def download_output_file(conversation_id: str, user_id: str, file_path: st
         raise HTTPException(status_code=404, detail="文件不存在")
 
     return FileResponse(real_path, filename=real_path.name)
+
+
+@router.post(
+    "/{conversation_id}/uploads",
+    response_model=ApiResponse[FileItem],
+    summary="上传一个文件到会话附件区",
+)
+async def upload_file(conversation_id: str, user_id: str, file: UploadFile = File(...)) -> ApiResponse:
+    """接收 multipart 上传，落盘到该会话的 uploads/ 目录并记录元数据。
+
+    会话不存在时按 chat 接口同样的"首次访问即建会话"约定自动创建，
+    不强制要求先调用 `POST /conversations/` ——聊天附件场景下前端往往是
+    "选完文件立刻上传"，可能先于会话正式创建。
+    """
+    settings = get_settings()
+    original_name = file.filename or "未命名文件"
+    extension = Path(original_name).suffix.lower()
+    allowed = {ext.strip().lower() for ext in settings.UPLOAD_ALLOWED_EXTENSIONS.split(",") if ext.strip()}
+    if allowed and extension not in allowed:
+        raise HTTPException(status_code=400, detail=f"不支持的文件类型: {extension or '(无扩展名)'}")
+
+    content = await file.read()
+    if len(content) > settings.UPLOAD_MAX_FILE_BYTES:
+        max_mb = settings.UPLOAD_MAX_FILE_BYTES / (1024 * 1024)
+        raise HTTPException(status_code=400, detail=f"文件过大，单个文件不能超过 {max_mb:.0f}MB")
+
+    conversation_store = get_conversation_store()
+    if not await conversation_store.exists(conversation_id):
+        await conversation_store.create(conversation_id, user_id)
+
+    file_id = generate_uuid()
+    stored_name = f"{file_id}_{original_name}"
+
+    workspace = get_thread_workspace_manager().get_or_create(conversation_id, user_id)
+    workspace.write_upload(stored_name, content)
+
+    row = await get_file_store().add_file(
+        file_id=file_id, conversation_id=conversation_id, user_id=user_id,
+        original_name=original_name, stored_name=stored_name,
+        content_type=file.content_type or "application/octet-stream", size_bytes=len(content),
+    )
+    return success(FileItem(**row))
+
+
+@router.get(
+    "/{conversation_id}/uploads",
+    response_model=ApiResponse[list[FileItem]],
+    summary="列出会话已上传的全部文件",
+)
+async def list_uploaded_files(conversation_id: str, user_id: str) -> ApiResponse:
+    """列出某会话下的全部上传文件。"""
+    conversation = await get_conversation_store().get(conversation_id, user_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND_MESSAGE)
+
+    rows = await get_file_store().list_files(conversation_id)
+    return success([FileItem(**row) for row in rows])
+
+
+@router.get("/{conversation_id}/uploads/{file_id}", summary="下载会话中已上传的文件")
+async def download_uploaded_file(conversation_id: str, user_id: str, file_id: str) -> FileResponse:
+    """下载用户此前上传到该会话的文件（按原始文件名回传）。"""
+    conversation = await get_conversation_store().get(conversation_id, user_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND_MESSAGE)
+
+    row = await get_file_store().get_file(file_id, conversation_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=_FILE_NOT_FOUND_MESSAGE)
+
+    workspace = get_thread_workspace_manager().get_or_create(conversation_id, user_id)
+    try:
+        real_path = workspace.resolve(row["stored_name"], WorkspaceDirectory.UPLOADS)
+    except PathTraversalError:
+        raise HTTPException(status_code=400, detail="非法路径")
+
+    if not real_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    return FileResponse(real_path, filename=row["original_name"], media_type=row["content_type"])

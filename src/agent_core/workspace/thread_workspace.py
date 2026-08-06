@@ -73,3 +73,23 @@ class ThreadWorkspace:
         """确保三个子目录物理存在（幂等，可重复调用）。"""
         for directory in WorkspaceDirectory:
             self.directory_for(directory).mkdir(parents=True, exist_ok=True)
+
+    def write_upload(self, stored_name: str, content: bytes) -> Path:
+        """把用户上传的文件内容落盘到 uploads/ 目录。
+
+        与 `Sandbox.write_file` 分开维护：后者是 Agent 工具的文本读写协议
+        （职责是"Agent 生成中间文件"），这里是 API 层接收用户上传的二进制
+        字节流直接落盘，两者调用方和数据形状都不同，不复用同一接口。
+
+        Args:
+            stored_name: 落盘文件名（不含目录），调用方需保证跨会话唯一
+                （通常是 `{file_id}_{original_name}`）。
+            content: 文件原始字节内容。
+
+        Returns:
+            落盘后的绝对路径。
+        """
+        real_path = self.resolve(stored_name, WorkspaceDirectory.UPLOADS)
+        real_path.parent.mkdir(parents=True, exist_ok=True)
+        real_path.write_bytes(content)
+        return real_path

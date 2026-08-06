@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>文件上传联调测试页</title>
+<style>
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 860px; margin: 40px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 15px; margin-top: 32px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+  .row { margin: 10px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=text] { flex: 1; min-width: 200px; padding: 6px 8px; }
+  button { padding: 6px 14px; cursor: pointer; }
+  #log { background: #111; color: #0f0; font-family: Consolas, monospace; font-size: 12px; padding: 10px; height: 200px; overflow-y: auto; white-space: pre-wrap; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+  #chatBox { border: 1px solid #ddd; padding: 10px; min-height: 120px; margin-top: 8px; font-size: 14px; white-space: pre-wrap; }
+  .tag { display: inline-block; background: #eef; border-radius: 4px; padding: 2px 8px; margin: 2px; font-size: 12px; cursor: pointer; }
+  .tag.selected { background: #99f; color: #fff; }
+</style>
+</head>
+<body>
+
+<h1>文件上传功能 · 前后端联调测试页</h1>
+<p>后端地址：<input type="text" id="baseUrl" value="http://127.0.0.1:8080" style="width:240px"></p>
+
+<h2>1. 会话</h2>
+<div class="row">
+  用户ID：<input type="text" id="userId" value="test_user">
+  会话ID：<input type="text" id="conversationId" value="" placeholder="留空则自动创建">
+  <button onclick="createConversation()">新建会话</button>
+</div>
+
+<h2>2. 上传文件</h2>
+<div class="row">
+  <input type="file" id="fileInput">
+  <button onclick="uploadFile()">上传</button>
+  <button onclick="refreshFiles()">刷新文件列表</button>
+</div>
+<table id="fileTable">
+  <thead><tr><th>选择</th><th>文件名</th><th>大小</th><th>类型</th><th>下载</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>3. 发送对话（携带已选中的附件）</h2>
+<div class="row">
+  <input type="text" id="messageInput" value="帮我看看我刚上传的文件">
+  <button onclick="sendChatRest()">REST 发送</button>
+  <button onclick="sendChatWs()">WebSocket 发送</button>
+</div>
+<div id="chatBox">（回复将显示在这里）</div>
+
+<h2>日志</h2>
+<div id="log"></div>
+
+<script>
+let selectedFileIds = new Set();
+let ws = null;
+
+function base() { return document.getElementById('baseUrl').value.replace(/\/$/, ''); }
+function convId() { return document.getElementById('conversationId').value.trim(); }
+function userId() { return document.getElementById('userId').value.trim() || 'test_user'; }
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+async function createConversation() {
+  const resp = await fetch(`${base()}/conversations/`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ user_id: userId(), title: '联调测试会话' }),
+  });
+  const data = await resp.json();
+  if (data.code === 200) {
+    document.getElementById('conversationId').value = data.data.id;
+    log(`会话已创建: ${data.data.id}`);
+  } else {
+    log(`创建会话失败: ${JSON.stringify(data)}`);
+  }
+}
+
+async function ensureConversationId() {
+  if (!convId()) {
+    document.getElementById('conversationId').value = crypto.randomUUID();
+    log(`未指定会话ID，自动生成: ${convId()}`);
+  }
+  return convId();
+}
+
+async function uploadFile() {
+  const fileEl = document.getElementById('fileInput');
+  if (!fileEl.files.length) { log('请先选择文件'); return; }
+  const cid = await ensureConversationId();
+
+  const form = new FormData();
+  form.append('file', fileEl.files[0]);
+
+  const url = `${base()}/conversations/${cid}/uploads?user_id=${encodeURIComponent(userId())}`;
+  log(`上传中: ${fileEl.files[0].name} -> ${url}`);
+  const resp = await fetch(url, { method: 'POST', body: form });
+  const data = await resp.json();
+  if (data.code === 200) {
+    log(`上传成功: id=${data.data.id} name=${data.data.original_name} size=${data.data.size_bytes}B`);
+    await refreshFiles();
+  } else {
+    log(`上传失败: ${JSON.stringify(data)}`);
+  }
+}
+
+async function refreshFiles() {
+  const cid = convId();
+  if (!cid) { log('请先创建/填写会话ID'); return; }
+  const resp = await fetch(`${base()}/conversations/${cid}/uploads?user_id=${encodeURIComponent(userId())}`);
+  const data = await resp.json();
+  if (data.code !== 200) { log(`获取文件列表失败: ${JSON.stringify(data)}`); return; }
+
+  const tbody = document.querySelector('#fileTable tbody');
+  tbody.innerHTML = '';
+  for (const f of data.data) {
+    const tr = document.createElement('tr');
+    const checked = selectedFileIds.has(f.id) ? 'checked' : '';
+    tr.innerHTML = `
+      <td><input type="checkbox" ${checked} onchange="toggleFile('${f.id}', this.checked)"></td>
+      <td>${f.original_name}</td>
+      <td>${(f.size_bytes/1024).toFixed(1)} KB</td>
+      <td>${f.content_type}</td>
+      <td><a href="${base()}/conversations/${cid}/uploads/${f.id}?user_id=${encodeURIComponent(userId())}" target="_blank">下载</a></td>
+    `;
+    tbody.appendChild(tr);
+  }
+  log(`共 ${data.data.length} 个文件`);
+}
+
+function toggleFile(id, checked) {
+  if (checked) selectedFileIds.add(id); else selectedFileIds.delete(id);
+}
+
+async function sendChatRest() {
+  const cid = await ensureConversationId();
+  const body = {
+    conversation_id: cid, user_id: userId(),
+    message: document.getElementById('messageInput').value,
+    thinking: false,
+    file_ids: Array.from(selectedFileIds),
+  };
+  log(`REST 发送: ${JSON.stringify(body)}`);
+  document.getElementById('chatBox').textContent = '（等待响应…）';
+  const resp = await fetch(`${base()}/chat/`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (data.code === 200) {
+    document.getElementById('chatBox').textContent = data.data.message;
+    log('REST 响应完成');
+  } else {
+    document.getElementById('chatBox').textContent = `错误: ${JSON.stringify(data)}`;
+  }
+}
+
+function sendChatWs() {
+  const cid = convId() || crypto.randomUUID();
+  document.getElementById('conversationId').value = cid;
+
+  const wsUrl = base().replace(/^http/, 'ws') + '/ws/chat';
+  ws = new WebSocket(wsUrl);
+  document.getElementById('chatBox').textContent = '';
+
+  ws.onopen = () => {
+    log(`WS 已连接: ${wsUrl}`);
+    ws.send(JSON.stringify({
+      role: 'agent', type: 'chat', action: 'send',
+      user_id: userId(), conversation_id: cid,
+      content: {
+        message: document.getElementById('messageInput').value,
+        thinking: false,
+        file_ids: Array.from(selectedFileIds),
+      },
+    }));
+  };
+  ws.onmessage = (evt) => {
+    const event = JSON.parse(evt.data);
+    if (event.type === 'token') {
+      document.getElementById('chatBox').textContent += event.content;
+    } else if (event.type === 'done') {
+      log('WS 本轮结束');
+      ws.close();
+    } else if (event.type === 'error') {
+      log(`WS 错误: ${event.message}`);
+    } else {
+      log(`WS 事件: ${event.type} ${JSON.stringify(event.content || '').slice(0,200)}`);
+    }
+  };
+  ws.onerror = (e) => log(`WS 连接错误`);
+  ws.onclose = () => log('WS 已关闭');
+}
+</script>
+</body>
+</html>

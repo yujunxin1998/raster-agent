@@ -103,6 +103,13 @@ class SystemConfiguration(BaseSettings):
     # 详见 src/agent_core/workspace。
     WORKSPACE_ROOT: str = os.getenv("WORKSPACE_ROOT", "./data/workspaces")
 
+    # ================ Upload（会话附件上传，新增） =================
+    UPLOAD_MAX_FILE_BYTES: int = int(os.getenv("UPLOAD_MAX_FILE_BYTES", str(20 * 1024 * 1024)))
+    UPLOAD_ALLOWED_EXTENSIONS: str = os.getenv(
+        "UPLOAD_ALLOWED_EXTENSIONS",
+        ".txt,.md,.csv,.json,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.webp",
+    )
+
     # ================ Sandbox（沙箱执行，新增） ===================
     SANDBOX_PROVIDER: str = os.getenv("SANDBOX_PROVIDER", "local")
     SANDBOX_COMMAND_TIMEOUT_SECONDS: int = int(os.getenv("SANDBOX_COMMAND_TIMEOUT_SECONDS", "60"))

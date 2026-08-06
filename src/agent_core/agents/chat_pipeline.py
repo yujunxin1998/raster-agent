@@ -30,6 +30,7 @@ from src.agent_core.eval.emitter import EvalEventEmitter
 from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.skills import get_skill_manager
 from src.agent_core.tools.tool_filter import tool_filter_registry
+from src.storage.file_store import get_file_store
 
 _TOOL_TYPE_MAP: dict[str, str] = {
     "web_search": "web_search",
@@ -171,6 +172,36 @@ def _tool_type(tool_name: str) -> str:
     return _TOOL_TYPE_MAP.get(tool_name, "custom")
 
 
+async def _build_message_with_attachments(conversation_id: str, message: str, file_ids: Optional[list[str]]) -> str:
+    """把本轮附件的文件名/大小以文本形式追加到用户发言末尾。
+
+    只做"让模型知道用户上传了哪些文件、下载路径是什么"的最小可用版本，不
+    解析二进制文件内容（PDF/图片等的自动解析属于后续增强，见设计文档待办）。
+    file_id 不存在或不属于该会话的静默跳过，不阻断本轮对话。
+
+    Args:
+        conversation_id: 会话 ID，用于附件归属校验。
+        message: 用户原始发言文本。
+        file_ids: 本轮携带的附件文件 ID 列表，可能为空。
+
+    Returns:
+        拼接了附件说明的最终文本；没有附件时原样返回 message。
+    """
+    if not file_ids:
+        return message
+
+    files = await get_file_store().get_files_by_ids(file_ids, conversation_id)
+    if not files:
+        return message
+
+    lines = ["", "【本轮附件】"]
+    for row in files:
+        size_kb = row["size_bytes"] / 1024
+        download_path = f"/conversations/{conversation_id}/uploads/{row['id']}"
+        lines.append(f"- {row['original_name']}（{size_kb:.1f}KB，{row['content_type']}，下载路径：{download_path}）")
+    return message + "\n".join(lines)
+
+
 def _build_final_sources(ref_state: dict, fallback_sources: list[dict]) -> list[dict]:
     """参考文献：优先使用模型通过 `<ref_json>` 明确选取的来源；模型未输出时以
     工具提取结果兜底，保证只要发生了检索，引用就能落库、历史查看不丢失。
@@ -200,6 +231,7 @@ async def run_chat_turn(
     message: str,
     thinking: bool = False,
     datasource_id: Optional[str] = None,
+    file_ids: Optional[list[str]] = None,
     extra_tools: Optional[list[BaseTool]] = None,
     emitter: Optional[EvalEventEmitter] = None,
     result: ChatTurnResult,
@@ -213,6 +245,8 @@ async def run_chat_turn(
         thinking: 是否开启深度思考模式。
         datasource_id: 数据源 ID，供 `DatasourceRoutingMiddleware`/
             `delegate_to_database_agent` 读取。
+        file_ids: 本轮携带的附件文件 ID 列表（来自上传接口），为空时不影响
+            现有行为。
         extra_tools: 前端本次请求注入的工具（经 `CustomToolConverter` 转换）。
         emitter: Eval 遥测状态机，为空时跳过埋点。
         result: 调用方传入的累计结果容器，本函数在迭代过程中原地写入。
@@ -235,11 +269,13 @@ async def run_chat_turn(
 
     await sanitize_dangling_tool_calls(agent, config)
 
+    message_with_attachments = await _build_message_with_attachments(conversation_id, message, file_ids)
+
     ref_state: dict = {"pending": "", "in_ref": False, "buf": "", "sources": None}
     fallback_sources: list[dict] = []
 
     async for stream_mode, chunk in agent.astream(
-        {"messages": [HumanMessage(content=message)]},
+        {"messages": [HumanMessage(content=message_with_attachments)]},
         config=config, context=context, stream_mode=["messages", "custom"],
     ):
         if stream_mode == "custom":

@@ -20,13 +20,26 @@ guardrail 依赖 storage 层的两个 Store，均需要在此之前完成初始�
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from contextlib import asynccontextmanager
+
+if sys.platform == "win32":
+    # psycopg（AsyncPostgresSaver 底层驱动，见 lifespan 第 8 步）不支持
+    # Windows 默认的 ProactorEventLoop，asyncio 连接时直接抛
+    # `psycopg.InterfaceError`。必须在本进程创建/绑定任何 event loop 之前
+    # （包括 uvicorn 内部创建的、以及 reload=True 时 spawn 出的子进程重新
+    # import 本模块时）完成策略切换，因此放在模块最顶部，不放在
+    # `if __name__ == "__main__":` 块里——后者在 reload 子进程里不保证会
+    # 早于 uvicorn 自己的 loop 创建时机执行到。非 Windows 平台上这是空操作
+    # （Linux/Docker 部署不受影响）。
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from loguru import logger
 
@@ -58,6 +71,7 @@ from src.config.settings import get_settings
 from src.storage.checkpoint_cleanup import get_checkpoint_cleanup, init_checkpoint_cleanup
 from src.storage.conversation_store import init_conversation_store
 from src.storage.database import close_database_pool, init_database_pool
+from src.storage.file_store import init_file_store
 from src.storage.memory_audit_store import init_memory_audit_store
 from src.storage.memory_jobs_store import init_memory_jobs_store
 from src.storage.message_store import init_message_store
@@ -146,6 +160,7 @@ async def lifespan(app: FastAPI):
     await init_memory_jobs_store(pool)
     await init_conversation_store(pool)
     await init_message_store(pool)
+    await init_file_store(pool)
 
     # 3. 虚拟工作区（按会话隔离目录）
     init_thread_workspace_manager(settings.WORKSPACE_ROOT)
@@ -276,6 +291,10 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
     logger.exception("未捕获异常")
     return JSONResponse(status_code=500, content=_error_body(500, str(exc)))
 
+
+if settings.CURRENT_ENV == "development":
+    # 本地前后端联调用的手工测试页面（上传/发送/下载全流程），生产环境不挂载。
+    app.mount("/manual_test", StaticFiles(directory="manual_test"), name="manual_test")
 
 app.include_router(health_router.router, tags=["Health"])
 app.include_router(skill_router.router, tags=["Skills"])

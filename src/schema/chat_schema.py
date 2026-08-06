@@ -20,6 +20,7 @@ class ChatRequest(BaseModel):
     message: str = Field("", max_length=_MAX_MESSAGE_LENGTH, description="用户发言内容")
     thinking: bool = Field(False, description="是否开启深度思考模式")
     datasource_id: Optional[str] = Field(None, description="数据源ID")
+    file_ids: Optional[list[str]] = Field(None, description="本轮携带的附件文件ID列表，来自上传接口返回的 id")
 
 
 class ChatResponse(BaseModel):
@@ -39,6 +40,7 @@ class WSChatRequest(BaseModel):
     thinking: bool = Field(False, description="是否开启深度思考模式")
     tool_list: Optional[list[dict[str, Any]]] = Field(None, description="前端注入的自定义工具列表（MCP JSON Schema 格式）")
     datasource_id: Optional[str] = Field(None, description="数据源ID")
+    file_ids: Optional[list[str]] = Field(None, description="本轮携带的附件文件ID列表，来自上传接口返回的 id")
 
 
 class WSEvent(BaseModel):

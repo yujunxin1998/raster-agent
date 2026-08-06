@@ -52,7 +52,7 @@ async def send_chat(chat_request: ChatRequest, response: Response) -> ApiRespons
     async for _event in run_chat_turn(
         conversation_id=conversation_id, user_id=user_id, message=chat_request.message,
         thinking=chat_request.thinking, datasource_id=chat_request.datasource_id,
-        emitter=emitter, result=turn_result,
+        file_ids=chat_request.file_ids, emitter=emitter, result=turn_result,
     ):
         pass  # REST 接口不流式返回，丢弃逐条事件，只读最终的 turn_result
 

@@ -77,6 +77,7 @@ async def websocket_chat(websocket: WebSocket) -> None:
             thinking = bool(content.get("thinking", False))
             tool_list = content.get("tool_list")
             datasource_id = content.get("datasource_id")
+            file_ids = content.get("file_ids")
 
             conversation_id = payload.get("conversation_id") or content.get("conversation_id") or generate_uuid()
             user_id = payload.get("user_id") or content.get("user_id") or user_id
@@ -89,7 +90,9 @@ async def websocket_chat(websocket: WebSocket) -> None:
                 )
 
             asyncio.create_task(
-                _handle_chat(client_id, conversation_id, message, thinking, extra_tools, user_id, datasource_id)
+                _handle_chat(
+                    client_id, conversation_id, message, thinking, extra_tools, user_id, datasource_id, file_ids,
+                )
             )
 
     except WebSocketDisconnect:
@@ -108,6 +111,7 @@ async def _handle_chat(
     extra_tools,
     user_id: str,
     datasource_id: str | None,
+    file_ids: list[str] | None = None,
 ) -> None:
     await manager.send_json(client_id, {"type": "start", "conversation_id": conversation_id})
 
@@ -126,7 +130,8 @@ async def _handle_chat(
         turn_result = ChatTurnResult()
         async for event in run_chat_turn(
             conversation_id=conversation_id, user_id=user_id, message=message, thinking=thinking,
-            datasource_id=datasource_id, extra_tools=extra_tools, emitter=emitter, result=turn_result,
+            datasource_id=datasource_id, file_ids=file_ids, extra_tools=extra_tools,
+            emitter=emitter, result=turn_result,
         ):
             await manager.send_json(client_id, event)
 
