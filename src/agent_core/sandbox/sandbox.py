@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-from src.common.constants import SandboxCommandStatus
+from src.common.constants import SandboxCommandStatus, WorkspaceDirectory
 
 
 @dataclass(frozen=True)
@@ -75,40 +75,57 @@ class Sandbox(ABC):
         """
 
     @abstractmethod
-    async def read_file(self, virtual_path: str) -> str:
+    async def read_file(
+        self, virtual_path: str, directory: WorkspaceDirectory = WorkspaceDirectory.WORKSPACE
+    ) -> str:
         """读取沙箱内某个虚拟路径对应文件的文本内容。
 
         Args:
-            virtual_path: 相对该会话工作区的虚拟路径。
+            virtual_path: 相对 `directory` 子目录的虚拟路径。
+            directory: 目标子目录，默认为 workspace（Agent 读写的中间文件）；
+                读取 `outputs/` 下已落地的产物时传 `WorkspaceDirectory.OUTPUTS`。
 
         Returns:
             文件文本内容。
 
         Raises:
-            PathTraversalError: virtual_path 越出了工作区范围。
+            PathTraversalError: virtual_path 越出了该子目录范围。
             FileNotFoundError: 文件不存在。
         """
 
     @abstractmethod
-    async def write_file(self, virtual_path: str, content: str, *, overwrite: bool = True) -> None:
+    async def write_file(
+        self,
+        virtual_path: str,
+        content: str,
+        *,
+        overwrite: bool = True,
+        directory: WorkspaceDirectory = WorkspaceDirectory.WORKSPACE,
+    ) -> None:
         """向沙箱内某个虚拟路径写入文本内容。
 
         Args:
-            virtual_path: 相对该会话工作区的虚拟路径。
+            virtual_path: 相对 `directory` 子目录的虚拟路径。
             content: 要写入的文本内容。
             overwrite: 目标文件已存在时是否允许覆盖，默认允许。
+            directory: 目标子目录，默认为 workspace；把最终产物落地到
+                `outputs/` 供下载时传 `WorkspaceDirectory.OUTPUTS`。
 
         Raises:
-            PathTraversalError: virtual_path 越出了工作区范围。
+            PathTraversalError: virtual_path 越出了该子目录范围。
             FileExistsError: overwrite=False 且目标文件已存在。
         """
 
     @abstractmethod
-    async def list_dir(self, virtual_path: str = "") -> list[dict]:
+    async def list_dir(
+        self, virtual_path: str = "", directory: WorkspaceDirectory = WorkspaceDirectory.WORKSPACE
+    ) -> list[dict]:
         """列出沙箱内某个虚拟目录下的直接子节点。
 
         Args:
-            virtual_path: 相对该会话工作区的虚拟路径，空字符串表示工作区根目录。
+            virtual_path: 相对 `directory` 子目录的虚拟路径，空字符串表示该
+                子目录根目录。
+            directory: 目标子目录，默认为 workspace。
 
         Returns:
             形如 `[{"name": ..., "path": ..., "type": "dir" | "file"}, ...]` 的列表。

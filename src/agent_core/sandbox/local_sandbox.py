@@ -177,29 +177,40 @@ class LocalSandbox(Sandbox):
             logger.warning(f"[LocalSandbox] 命令执行失败 command={command} return_code={result.return_code}")
         return result
 
-    async def read_file(self, virtual_path: str) -> str:
-        real_path = self._workspace.resolve(virtual_path, WorkspaceDirectory.WORKSPACE)
+    async def read_file(
+        self, virtual_path: str, directory: WorkspaceDirectory = WorkspaceDirectory.WORKSPACE
+    ) -> str:
+        real_path = self._workspace.resolve(virtual_path, directory)
         if not real_path.is_file():
             raise FileNotFoundError(f"文件不存在: {virtual_path}")
         return real_path.read_text(encoding="utf-8")
 
-    async def write_file(self, virtual_path: str, content: str, *, overwrite: bool = True) -> None:
-        real_path = self._workspace.resolve(virtual_path, WorkspaceDirectory.WORKSPACE)
+    async def write_file(
+        self,
+        virtual_path: str,
+        content: str,
+        *,
+        overwrite: bool = True,
+        directory: WorkspaceDirectory = WorkspaceDirectory.WORKSPACE,
+    ) -> None:
+        real_path = self._workspace.resolve(virtual_path, directory)
         if real_path.exists() and not overwrite:
             raise FileExistsError(f"文件已存在且 overwrite=False: {virtual_path}")
         real_path.parent.mkdir(parents=True, exist_ok=True)
         real_path.write_text(content, encoding="utf-8")
 
-    async def list_dir(self, virtual_path: str = "") -> list[dict]:
+    async def list_dir(
+        self, virtual_path: str = "", directory: WorkspaceDirectory = WorkspaceDirectory.WORKSPACE
+    ) -> list[dict]:
         try:
-            real_dir = self._workspace.resolve(virtual_path, WorkspaceDirectory.WORKSPACE)
+            real_dir = self._workspace.resolve(virtual_path, directory)
         except PathTraversalError:
             raise
         if not real_dir.is_dir():
             raise ValueError(f"'{virtual_path}' 不是一个目录")
 
         entries = sorted(real_dir.iterdir(), key=lambda entry: (entry.is_file(), entry.name.lower()))
-        base = self._workspace.workspace_dir
+        base = self._workspace.directory_for(directory)
         return [
             {
                 "name": entry.name,

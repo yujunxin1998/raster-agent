@@ -35,6 +35,7 @@ from langchain_core.tools import tool
 
 from src.agent_core.sandbox import get_sandbox_provider
 from src.agent_core.sandbox.sandbox import CommandResult, Sandbox
+from src.common.constants import WorkspaceDirectory
 
 _SANDBOX_UNAVAILABLE_MESSAGE = "当前调用缺少会话上下文（thread_id），无法使用沙箱工具。"
 
@@ -88,6 +89,18 @@ async def read_file(path: str, config: RunnableConfig) -> str:
 
     async def _run(sandbox: Sandbox) -> str:
         return await sandbox.read_file(path)
+
+    return await _with_sandbox(config, _run)
+
+
+@tool
+async def save_output_file(path: str, content: str, config: RunnableConfig) -> str:
+    """把最终产物（图表、生成的文档等，不是中间过程文件）保存到本次会话的产物目录，返回可下载链接。"""
+
+    async def _run(sandbox: Sandbox) -> str:
+        await sandbox.write_file(path, content, directory=WorkspaceDirectory.OUTPUTS)
+        conversation_id, _ = _resolve_ids(config)
+        return f"已保存产物 {path}，下载链接：/conversations/{conversation_id}/outputs/{path}"
 
     return await _with_sandbox(config, _run)
 

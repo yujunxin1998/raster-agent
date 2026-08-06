@@ -22,6 +22,7 @@ from src.agent_core.memory.memory_manager import (
     init_memory_manager,
 )
 from src.agent_core.memory.memory_sensitive_filter import contains_sensitive_info
+from src.agent_core.memory.memory_staleness_reviewer import MemoryStalenessReviewer
 
 __all__ = [
     "BaseMemoryStore",
@@ -33,4 +34,5 @@ __all__ = [
     "get_memory_manager",
     "get_memory_with_retry",
     "contains_sensitive_info",
+    "MemoryStalenessReviewer",
 ]

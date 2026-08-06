@@ -435,6 +435,44 @@ class ElasticsearchMemoryStore(BaseMemoryStore):
         )
         return True
 
+    async def sweep_stale(self, *, max_age_days: int, low_importance_threshold: int) -> int:
+        if not self._es:
+            return 0
+
+        query = {
+            "bool": {
+                "filter": [{"term": {"status": "active"}}],
+                "should": [
+                    {"range": {"expires_at": {"lt": "now"}}},
+                    {
+                        "bool": {
+                            "filter": [
+                                {"range": {"importance": {"lte": low_importance_threshold}}},
+                                {"term": {"access_count": 0}},
+                                {"range": {"created_at": {"lt": f"now-{max_age_days}d"}}},
+                            ]
+                        }
+                    },
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+
+        try:
+            response = await self._es.update_by_query(
+                index=self._es_memory_index,
+                body={"query": query, "script": {"source": "ctx._source.status = 'archived'"}},
+                conflicts="proceed",
+            )
+        except Exception as exc:
+            logger.error(f"[MemoryStore] staleness 归档扫描失败: {exc}")
+            return 0
+
+        archived = response.get("updated", 0)
+        if archived:
+            logger.info(f"[MemoryStore] staleness 扫描归档 {archived} 条记忆")
+        return archived
+
     # ── 内部方法 ──────────────────────────────────────────────
 
     async def _record_audit(
@@ -469,8 +507,9 @@ class ElasticsearchMemoryStore(BaseMemoryStore):
     def _build_response(self, memory_id: str, source: dict) -> dict:
         """把 ES _source 组装为统一的记忆响应 dict。
 
-        status 不在存储层物理写回 expired（避免引入定时清扫任务），而是在
-        读取时按 expires_at 是否已过去派生展示。
+        单条读取时仍按 `expires_at` 是否已过去派生展示 expired（不等下一次
+        `sweep_stale()` 扫描才让用户看到"过期了"），真正把 status 物理写回
+        archived 的动作由 `sweep_stale()` 定期批量执行，见该方法说明。
         """
         status = source.get("status") or "active"
         expires_at = source.get("expires_at")

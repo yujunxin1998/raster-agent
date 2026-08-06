@@ -1,11 +1,10 @@
 """本地沙箱的提供者实现。"""
 from __future__ import annotations
 
-from loguru import logger
-
 from src.agent_core.sandbox.local_sandbox import LocalSandbox
 from src.agent_core.sandbox.sandbox import Sandbox
 from src.agent_core.sandbox.sandbox_provider import SandboxProvider
+from src.agent_core.sandbox.sandbox_registry import init_sandbox_provider
 from src.agent_core.workspace.thread_workspace_manager import ThreadWorkspaceManager
 
 
@@ -50,10 +49,7 @@ class LocalSandboxProvider(SandboxProvider):
 
     async def release(self, sandbox: Sandbox) -> None:
         # 本地进程沙箱无需释放任何资源，保留方法体以满足接口契约并便于未来扩展审计埋点。
-        logger.debug("[LocalSandboxProvider] release 为空操作")
-
-
-_provider: LocalSandboxProvider | None = None
+        pass
 
 
 def init_local_sandbox_provider(
@@ -63,23 +59,20 @@ def init_local_sandbox_provider(
     max_output_bytes: int,
     max_memory_mb: int,
 ) -> None:
-    """应用启动时调用一次，完成全局单例初始化。"""
-    global _provider
-    _provider = LocalSandboxProvider(
-        workspace_manager,
-        default_timeout_seconds=default_timeout_seconds,
-        max_output_bytes=max_output_bytes,
-        max_memory_mb=max_memory_mb,
-    )
-    logger.info("[LocalSandboxProvider] 初始化完成")
+    """应用启动时调用一次，构造 LocalSandboxProvider 并登记为全局单例。
 
-
-def get_sandbox_provider() -> LocalSandboxProvider:
-    """返回全局唯一的沙箱提供者实例。
-
-    Raises:
-        RuntimeError: init_local_sandbox_provider() 尚未被调用。
+    全局单例登记表由 `sandbox_registry` 统一持有（不再由本模块自己持有），
+    这样 `get_sandbox_provider()` 无论应用启动时选择了 Local 还是 Docker
+    提供者都能拿到正确的实例。
     """
-    if _provider is None:
-        raise RuntimeError("SandboxProvider 尚未初始化，请确认应用已完成启动")
-    return _provider
+    init_sandbox_provider(
+        LocalSandboxProvider(
+            workspace_manager,
+            default_timeout_seconds=default_timeout_seconds,
+            max_output_bytes=max_output_bytes,
+            max_memory_mb=max_memory_mb,
+        )
+    )
+
+
+__all__ = ["LocalSandboxProvider", "init_local_sandbox_provider"]

@@ -2,17 +2,24 @@
 
 组装顺序（lifespan 内）：数据库连接池 → 各 Store 建表 → workspace/sandbox/
 guardrail 三个基础设施 → skill 机制 → memory 机制 → 会话/消息存储 →
-Lead Agent checkpointer → 内部工具过滤名单。这个顺序对应各模块间的真实依赖
-关系（skill 机制依赖 guardrail + sandbox，guardrail 依赖 storage 层的两个
-Store，均需要在此之前完成初始化；Lead Agent 依赖前面全部基础设施都已就绪）。
+Lead Agent checkpointer → checkpoint 孤儿清理 → 后台维护循环 → 内部工具过滤
+名单。这个顺序对应各模块间的真实依赖关系（skill 机制依赖 guardrail + sandbox，
+guardrail 依赖 storage 层的两个 Store，均需要在此之前完成初始化；Lead Agent
+依赖前面全部基础设施都已就绪；checkpoint 清理依赖 checkpointer 已完成初始化）。
 
 `/chat`（REST，非流式）、`/conversations`、`/ws/chat`（WebSocket 流式 + 前端
 工具双通道回环）三组接口对应设计文档 4.1 节"Lead Agent + 委派工具"的落地。
 配置了 `REDIS_URL` 时 `EvalMiddleware` 会把请求级观测数据写入 Redis Streams
 （`eval:trace`/`eval:tool`/`eval:http`），未配置时全程静默降级。
+
+后台维护循环（`_maintenance_loop`）不引入 APScheduler 等独立调度框架，延续
+本工程"进程内简单 asyncio 任务"的风格，承载两件周期性维护工作：记忆 staleness
+复核（`MemoryStalenessReviewer`）和 LangGraph checkpoint 孤儿数据清理
+（`CheckpointCleanup.cleanup_orphans`），详见设计文档第七节路线图第三期。
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 
@@ -32,9 +39,10 @@ from src.agent_core.memory import (
     MemoryCompressor,
     MemoryExtractor,
     MemoryManager,
+    MemoryStalenessReviewer,
     init_memory_manager,
 )
-from src.agent_core.sandbox import get_sandbox_provider, init_local_sandbox_provider
+from src.agent_core.sandbox import get_sandbox_provider, init_docker_sandbox_provider, init_local_sandbox_provider
 from src.agent_core.skills import init_skill_manager
 from src.agent_core.tools.tool_filter import tool_filter_registry
 from src.agent_core.workspace import get_thread_workspace_manager, init_thread_workspace_manager
@@ -47,6 +55,7 @@ from src.api.router import (
 )
 from src.api.websocket import chat_ws
 from src.config.settings import get_settings
+from src.storage.checkpoint_cleanup import get_checkpoint_cleanup, init_checkpoint_cleanup
 from src.storage.conversation_store import init_conversation_store
 from src.storage.database import close_database_pool, init_database_pool
 from src.storage.memory_audit_store import init_memory_audit_store
@@ -100,6 +109,28 @@ def _build_memory_manager(memory_store: ElasticsearchMemoryStore) -> MemoryManag
     )
 
 
+async def _maintenance_loop(staleness_reviewer: MemoryStalenessReviewer) -> None:
+    """周期性后台维护：记忆 staleness 复核 + checkpoint 孤儿数据清理。
+
+    循环体在 `sleep` 之前，启动后立即先跑一轮，不需要等一整个 interval 才第一次
+    生效；两个子任务各自 try/except，其中一个失败不影响另一个继续执行。
+    """
+    interval_seconds = settings.MAINTENANCE_INTERVAL_HOURS * 3600
+    while True:
+        if settings.MEMORY_STALENESS_ENABLED:
+            await staleness_reviewer.run_once()
+
+        if settings.CHECKPOINT_CLEANUP_ENABLED:
+            try:
+                cleaned = await get_checkpoint_cleanup().cleanup_orphans()
+                if cleaned:
+                    logger.info(f"[Maintenance] 清理 {cleaned} 个孤儿 checkpoint thread")
+            except Exception as exc:
+                logger.warning(f"[Maintenance] checkpoint 孤儿清理失败: {exc}")
+
+        await asyncio.sleep(interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── 启动 ────────────────────────────────────────────────
@@ -120,13 +151,23 @@ async def lifespan(app: FastAPI):
     init_thread_workspace_manager(settings.WORKSPACE_ROOT)
     workspace_manager = get_thread_workspace_manager()
 
-    # 4. 本地沙箱提供者
-    init_local_sandbox_provider(
-        workspace_manager,
-        default_timeout_seconds=settings.SANDBOX_COMMAND_TIMEOUT_SECONDS,
-        max_output_bytes=settings.SANDBOX_MAX_OUTPUT_BYTES,
-        max_memory_mb=settings.SANDBOX_MAX_MEMORY_MB,
-    )
+    # 4. 沙箱提供者（按 SANDBOX_PROVIDER 选择 Local 或 Docker 实现）
+    if settings.SANDBOX_PROVIDER == "docker":
+        await init_docker_sandbox_provider(
+            workspace_manager,
+            image=settings.DOCKER_SANDBOX_IMAGE,
+            project_root=settings.PROJECT_ROOT,
+            default_timeout_seconds=settings.SANDBOX_COMMAND_TIMEOUT_SECONDS,
+            max_output_bytes=settings.SANDBOX_MAX_OUTPUT_BYTES,
+            max_memory_mb=settings.SANDBOX_MAX_MEMORY_MB,
+        )
+    else:
+        init_local_sandbox_provider(
+            workspace_manager,
+            default_timeout_seconds=settings.SANDBOX_COMMAND_TIMEOUT_SECONDS,
+            max_output_bytes=settings.SANDBOX_MAX_OUTPUT_BYTES,
+            max_memory_mb=settings.SANDBOX_MAX_MEMORY_MB,
+        )
     sandbox_provider = get_sandbox_provider()
 
     # 5. 权限控制（组合技能开关表 + 工具权限表）
@@ -165,8 +206,25 @@ async def lifespan(app: FastAPI):
         init_checkpointer(checkpointer)
         logger.info("Checkpointer 初始化完成")
 
+        # 9. checkpoint 孤儿数据清理（依赖 checkpointer 已完成初始化）
+        init_checkpoint_cleanup(pool, checkpointer)
+
+        # 10. 后台维护循环：记忆 staleness 复核 + checkpoint 孤儿数据清理
+        staleness_reviewer = MemoryStalenessReviewer(
+            memory_store,
+            max_age_days=settings.MEMORY_STALENESS_MAX_AGE_DAYS,
+            low_importance_threshold=settings.MEMORY_STALENESS_IMPORTANCE_THRESHOLD,
+        )
+        maintenance_task = asyncio.create_task(_maintenance_loop(staleness_reviewer))
+
         logger.info("全部基础设施初始化完成，应用已就绪")
         yield
+
+        maintenance_task.cancel()
+        try:
+            await maintenance_task
+        except asyncio.CancelledError:
+            pass
 
     # ── 关闭 ────────────────────────────────────────────────
     await memory_store.close()

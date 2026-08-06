@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
@@ -107,6 +108,20 @@ class SystemConfiguration(BaseSettings):
     SANDBOX_COMMAND_TIMEOUT_SECONDS: int = int(os.getenv("SANDBOX_COMMAND_TIMEOUT_SECONDS", "60"))
     SANDBOX_MAX_OUTPUT_BYTES: int = int(os.getenv("SANDBOX_MAX_OUTPUT_BYTES", str(2 * 1024 * 1024)))
     SANDBOX_MAX_MEMORY_MB: int = int(os.getenv("SANDBOX_MAX_MEMORY_MB", "512"))
+    # SANDBOX_PROVIDER=docker 时使用：默认镜像不含 Node.js，涉及 .js 脚本的技能
+    # 需要换成自带 node 的镜像；PROJECT_ROOT 用于技能脚本绝对路径在容器内的翻译，
+    # 默认取本文件所在项目的根目录，一般不需要覆盖。
+    DOCKER_SANDBOX_IMAGE: str = os.getenv("DOCKER_SANDBOX_IMAGE", "python:3.11-slim")
+    PROJECT_ROOT: str = os.getenv("PROJECT_ROOT", str(Path(__file__).resolve().parents[2]))
+
+    # ================ 后台维护任务（新增） =========================
+    # 复用同一个 asyncio 周期循环承载 staleness 复核 + checkpoint 孤儿清理，
+    # 不引入 APScheduler 等独立调度框架。
+    MAINTENANCE_INTERVAL_HOURS: int = int(os.getenv("MAINTENANCE_INTERVAL_HOURS", "24"))
+    MEMORY_STALENESS_ENABLED: bool = os.getenv("MEMORY_STALENESS_ENABLED", "true").lower() == "true"
+    MEMORY_STALENESS_MAX_AGE_DAYS: int = int(os.getenv("MEMORY_STALENESS_MAX_AGE_DAYS", "90"))
+    MEMORY_STALENESS_IMPORTANCE_THRESHOLD: int = int(os.getenv("MEMORY_STALENESS_IMPORTANCE_THRESHOLD", "3"))
+    CHECKPOINT_CLEANUP_ENABLED: bool = os.getenv("CHECKPOINT_CLEANUP_ENABLED", "true").lower() == "true"
 
     # ================ Guardrail（权限控制，新增） =================
     GUARDRAIL_ENABLED: bool = os.getenv("GUARDRAIL_ENABLED", "true").lower() == "true"

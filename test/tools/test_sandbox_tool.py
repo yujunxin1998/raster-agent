@@ -9,8 +9,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.agent_core.sandbox.sandbox import CommandResult
-from src.agent_core.tools.sandbox_tool import read_file, run_command, run_python, write_file
-from src.common.constants import SandboxCommandStatus
+from src.agent_core.tools.sandbox_tool import read_file, run_command, run_python, save_output_file, write_file
+from src.common.constants import SandboxCommandStatus, WorkspaceDirectory
 
 
 def _config(thread_id: str | None = "c1", user_id: str | None = "u1") -> dict:
@@ -65,6 +65,18 @@ async def test_read_file_releases_sandbox_even_on_exception() -> None:
 
     assert raised
     provider.release.assert_awaited_once_with(sandbox)
+
+
+async def test_save_output_file_writes_to_outputs_directory_and_returns_link() -> None:
+    sandbox = MagicMock()
+    sandbox.write_file = AsyncMock()
+    provider = _fake_provider(sandbox)
+
+    with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
+        result = await save_output_file.coroutine(path="report.md", content="# 结果", config=_config())
+
+    sandbox.write_file.assert_awaited_once_with("report.md", "# 结果", directory=WorkspaceDirectory.OUTPUTS)
+    assert "/conversations/c1/outputs/report.md" in result
 
 
 async def test_run_python_rejects_when_both_code_and_file_path_given() -> None:

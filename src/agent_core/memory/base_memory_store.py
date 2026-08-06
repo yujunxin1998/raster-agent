@@ -156,3 +156,22 @@ class BaseMemoryStore(ABC):
         Returns:
             是否删除成功。
         """
+
+    @abstractmethod
+    async def sweep_stale(self, *, max_age_days: int, low_importance_threshold: int) -> int:
+        """全量扫描（不分 user_id）并归档陈旧记忆，供后台维护任务定期调用。
+
+        归档条件（满足任一即可）：
+            1. `expires_at` 已经过去（把此前只在读取时派生展示的 expired 状态
+               物理落地为 archived）。
+            2. 重要度 <= `low_importance_threshold` 且从未被召回命中过
+               （`access_count == 0`）且创建时间早于 `max_age_days` 天前——
+               长期无人问津的低价值记忆。
+
+        Args:
+            max_age_days: 规则 2 里"创建多久以后"的天数阈值。
+            low_importance_threshold: 规则 2 里的重要度上限（<=）。
+
+        Returns:
+            本次归档的记忆条数。
+        """

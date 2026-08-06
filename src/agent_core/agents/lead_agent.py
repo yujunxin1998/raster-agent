@@ -48,7 +48,7 @@ from src.agent_core.prompts.system_prompt_builder import system_prompt_builder
 from src.agent_core.sandbox import get_sandbox_provider
 from src.agent_core.skills import get_skill_manager
 from src.agent_core.tools.memory_tools import recall_memory, save_memory
-from src.agent_core.tools.sandbox_tool import read_file, run_command, run_python, write_file
+from src.agent_core.tools.sandbox_tool import read_file, run_command, run_python, save_output_file, write_file
 from src.agent_core.workspace import get_thread_workspace_manager
 from src.config.settings import get_settings
 from src.storage.conversation_store import get_conversation_store
@@ -105,6 +105,7 @@ def build_lead_agent(
         read_file,
         run_python,
         run_command,
+        save_output_file,
         *skill_manager.get_tools("general"),
         *skill_manager.get_tools("tool"),
         *skill_manager.get_tools("rag"),

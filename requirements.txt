@@ -27,6 +27,8 @@ tavily-python==0.5.0
 httpx==0.28.1
 pyyaml==6.0
 redis==5.0.1
+# DockerSandboxProvider（SANDBOX_PROVIDER=docker 时使用，见 agent_core/sandbox/docker_sandbox_provider.py）
+docker==7.1.0
 
 # ===================== 日志 =====================
 loguru==0.7.2

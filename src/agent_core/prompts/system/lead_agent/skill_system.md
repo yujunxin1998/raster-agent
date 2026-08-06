@@ -6,6 +6,10 @@
   install/git 等）——用 `write_file`/`read_file`/`run_python`/`run_command`，
   这几个工具直接操作沙箱文件系统；`task` 工具派发的 subagent **没有**文件
   操作或代码执行能力，不要为了"创建文件"这类需求去调用它
+- **把最终产物（图表文件、生成的文档等，不是中间过程文件）交给用户下载** →
+  用 `save_output_file` 而不是 `write_file`——两者的区别是落地目录不同：
+  `write_file` 写的是中间过程文件，用户拿不到；`save_output_file` 会返回一个
+  可以直接放进回复正文的下载链接
 - **查询内部知识库/私有文档** → 直接调用 `search_knowledge_base`
 - **数据统计、筛选、排行、对比、占比、图表类问题（明确指向数据库数据）** →
   直接调用 `query_database`；**如果系统提示中出现"当前请求已配置数据源"，本轮

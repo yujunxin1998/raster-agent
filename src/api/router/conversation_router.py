@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 
+from src.agent_core.workspace import get_thread_workspace_manager
+from src.common.constants import WorkspaceDirectory
+from src.common.exceptions import PathTraversalError
 from src.common.response import ApiResponse, success
 from src.schema.conversation_schema import (
     ConversationCreate,
@@ -15,6 +19,7 @@ from src.schema.conversation_schema import (
     ConversationUpdate,
     MessageItem,
 )
+from src.storage.checkpoint_cleanup import get_checkpoint_cleanup
 from src.storage.conversation_store import get_conversation_store
 from src.storage.message_store import get_message_store
 from src.utils.uuid_utils import generate_uuid
@@ -87,4 +92,30 @@ async def delete_conversation(conversation_id: str, user_id: str) -> ApiResponse
 
     await conversation_store.delete(conversation_id, user_id)
     await get_message_store().delete_messages(conversation_id)
+    await get_checkpoint_cleanup().delete_for_thread(conversation_id)
     return success(None)
+
+
+@router.get("/{conversation_id}/outputs/{file_path:path}", summary="下载会话产物文件")
+async def download_output_file(conversation_id: str, user_id: str, file_path: str) -> FileResponse:
+    """下载 `save_output_file` 工具保存到本次会话 outputs 目录下的产物文件。
+
+    对应设计文档 5.2 节"outputs/ 下的产物需要有对应的静态文件服务/下载接口
+    暴露给前端"——按"生成 URL 挂进现有 Markdown 正文"的方式兼容，不需要前端
+    改动：工具返回文本里直接带这个接口的相对路径，前端 Markdown 渲染器本来
+    就会把它渲成可点击链接。
+    """
+    conversation = await get_conversation_store().get(conversation_id, user_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND_MESSAGE)
+
+    workspace = get_thread_workspace_manager().get_or_create(conversation_id, user_id)
+    try:
+        real_path = workspace.resolve(file_path, WorkspaceDirectory.OUTPUTS)
+    except PathTraversalError:
+        raise HTTPException(status_code=400, detail="非法路径")
+
+    if not real_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    return FileResponse(real_path, filename=real_path.name)
