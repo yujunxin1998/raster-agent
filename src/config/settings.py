@@ -30,6 +30,7 @@ class SystemConfiguration(BaseSettings):
     APP_NAME: str = os.getenv("APP_NAME", "raster-agent-server")
     CURRENT_ENV: str = os.getenv("ENVIRONMENT", "development")
     APP_VERSION: str = os.getenv("APP_VERSION", "0.1.0")
+    APP_PORT: int = int(os.getenv("APP_PORT", "8080"))
 
     # ================ 大语言模型环境依赖 ========================
     API_KEY: str = os.getenv("OPENAI_API_KEY", os.getenv("API_KEY", ""))
