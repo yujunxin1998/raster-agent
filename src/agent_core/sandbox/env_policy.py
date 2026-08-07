@@ -4,6 +4,16 @@
 过滤掉看起来像密钥的变量名，需要的密钥由技能 frontmatter 的 `required_secrets`
 字段显式声明、按请求注入（该按需注入能力属于 guardrail + skill 联动的后续增量，
 本模块只负责"默认清洗"这一层兜底防线）。
+
+另外强制注入 `PYTHONIOENCODING=utf-8`：Windows 上 Python 子进程的
+`sys.stdout`/`sys.stderr` 默认编码取自系统区域码页（中文 Windows 通常是
+GBK/cp936），而 `Sandbox.execute_command()` 的调用方（`sandbox_tool.py`/
+`skill_content_reader.py`）统一按 UTF-8 解码 stdout/stderr——两边编码不一致时，
+子进程脚本里 `print()` 输出的中文字符会被错误解码成乱码（用
+`bytes.decode("utf-8", errors="replace")` 解码 GBK 字节得到的替换字符），
+这与"Sandbox 实现有 bug"无关，是纯粹的编码不匹配，跟 POSIX 下默认就是 UTF-8
+locale 因而从未暴露出来的情况不同。强制设置后子进程无论运行在哪个操作系统/
+区域设置下，`print()` 输出都固定按 UTF-8 编码，和这一层的解码方式对齐。
 """
 from __future__ import annotations
 
@@ -49,4 +59,7 @@ def build_sandbox_env(extra_env: dict[str, str] | None = None) -> dict[str, str]
 
     if extra_env:
         cleaned.update(extra_env)
+
+    # 强制覆盖，不允许被 extra_env 意外带偏——这是编码正确性问题，不是可配置项。
+    cleaned["PYTHONIOENCODING"] = "utf-8"
     return cleaned
