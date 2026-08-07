@@ -210,10 +210,14 @@ class GuardrailProvider(Protocol):
 **生命周期**：`outputs/` 下的产物需要有对应的静态文件服务/下载接口暴露给前端（前端目前没有这类展示位，需要和 `MessageItem.vue` 配合新增，这一点超出"零改动 web"的约束，需要和前端团队单独沟通，不在本次后端方案强制范围内，先按"生成 URL 挂进现有 Markdown 正文"的方式兼容，类似现在 `database_agent` 返回的 `<echart>` 图表块）。
 
 > **落地说明**（第三期）：已实现。新增 `save_output_file` 工具（`agent_core/tools/sandbox_tool.py`），
-> 把内容写入 `outputs/` 目录并返回一条相对路径下载链接；`conversation_router.py` 新增
+> 把内容写入 `outputs/` 目录并返回一条下载链接；`conversation_router.py` 新增
 > `GET /conversations/{conversation_id}/outputs/{file_path}` 接口，按 `user_id` 做 owner 校验后用
-> `FileResponse` 返回文件——完全按本节设想的"生成 URL 挂进 Markdown 正文"方式落地，没有新增
-> `PUBLIC_BASE_URL` 之类的配置，也不需要前端改动。
+> `FileResponse` 返回文件——完全按本节设想的"生成 URL 挂进 Markdown 正文"方式落地，不需要前端改动。
+> 最初直接返回相对路径（`/conversations/...`），上线后发现前端是独立部署的 SPA（有自己的
+> `base` 路径），聊天正文里的相对链接会被浏览器解析成"当前页面（前端）自己的地址 + 这段路径"
+> 而不是本服务的地址，点击后打不开（Vite dev server 报"did you mean to visit .../outputs/...
+> instead?"这类误导性提示）——因此补了 `settings.PUBLIC_BASE_URL` 配置项，配置后
+> `save_output_file` 返回绝对链接；留空时退化为相对路径，仅适用于前端和本服务同源部署的场景。
 
 ### 5.3 沙箱（Sandbox 执行环境）
 

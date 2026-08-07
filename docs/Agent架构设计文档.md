@@ -118,8 +118,8 @@ sequenceDiagram
     R->>DB: 会话不存在则 create()
     R->>P: run_chat_turn(...)
     P->>A: build_lead_agent() 现造实例（不缓存）
-    P->>A: sanitize_dangling_tool_calls() 修复悬空调用
     P->>A: astream(messages, config, stream_mode=[messages,custom])
+    A->>A: DanglingToolCallMiddleware.abefore_agent() 修复悬空调用
     loop 每一轮模型调用
         A->>SMW: awrap_model_call
         SMW->>LLM: .astream() 逐块拉取
@@ -144,7 +144,7 @@ sequenceDiagram
 - **Lead Agent 不做单例缓存** — 每次请求现造一个新的 `CompiledStateGraph`，构造成本低，换来委派工具列表、技能列表、日期变量始终最新。
 - **递归深度** — `recursion_limit` 普通模式 75，深度思考模式 150（`resolve_recursion_limit()`）。
 - **引用来源解析** — 维护 `<ref_json>...</ref_json>` 状态机从模型输出中抽取结构化引用；`search_knowledge_base`/`web_search` 工具原始输出还有正则兜底解析。
-- **悬空工具调用修复** — `sanitize_dangling_tool_calls()` 处理上次进程崩溃遗留的 "AIMessage.tool_calls 有但 ToolMessage 缺失" 半截状态，避免触发 `INVALID_CHAT_HISTORY`。
+- **悬空工具调用修复** — `DanglingToolCallMiddleware`（`abefore_agent` 钩子，整个中间件流水线最靠前的一个）处理上次进程崩溃遗留的 "AIMessage.tool_calls 有但 ToolMessage 缺失" 半截状态，以及历史压缩逻辑可能遗留的孤儿 `ToolMessage`（有响应没调用），避免触发 `INVALID_CHAT_HISTORY`。
 
 ---
 
@@ -156,30 +156,31 @@ sequenceDiagram
 flowchart LR
     subgraph outer["外层 → 内层（越靠外越先执行）"]
         direction LR
-        M1["1 Input<br/>Sanitization"] --> M2["2 ThreadData"] --> M3["3 Memory<br/>Injection"] --> M4["4 Guardrail"] --> M5["5 Sandbox"] --> M6["6 ToolAudit"] --> M7["7 ToolError<br/>Handling"] --> M8["8 LoopDetection"] --> M9["9 Datasource<br/>Routing"] --> M10["10 Streaming<br/>Model"]
+        M1["1 DanglingTool<br/>Call"] --> M2["2 Input<br/>Sanitization"] --> M3["3 ThreadData"] --> M4["4 Memory<br/>Injection"] --> M5["5 Guardrail"] --> M6["6 Sandbox"] --> M7["7 ToolAudit"] --> M8["8 ToolError<br/>Handling"] --> M9["9 LoopDetection"] --> M10["10 Datasource<br/>Routing"] --> M11["11 Streaming<br/>Model"]
     end
-    M10 -.-> CORE(("model / tools<br/>节点"))
+    M11 -.-> CORE(("model / tools<br/>节点"))
 ```
 
 *中间件按注册顺序层层包裹核心节点；`GuardrailMiddleware` 必须排在 `ToolErrorHandlingMiddleware` 之前（权限拒绝是短路而非异常），`StreamingModelMiddleware` 必须在最内层（离真实模型调用最近，保证 `DatasourceRoutingMiddleware` 纠正重试时两次调用都能完整流式输出）。收尾类中间件（Summarization / Title / MemoryExtraction）挂在 `aafter_agent`，图中未画出执行顺序层级。*
 
 | 中间件 | 钩子 | 职责 |
 |---|---|---|
+| `DanglingToolCall` | abefore_agent | 整个流水线最靠前，修复上轮遗留的悬空 tool_calls / 孤儿 ToolMessage |
 | `InputSanitization` | abefore_model | 清洗用户输入的控制字符、多余空白 |
 | `ThreadData` | abefore_agent | 获取/创建会话隔离工作区（`ThreadWorkspace`） |
-| `MemoryInjection` | awrap_model_call | 检索长期记忆，临时拼进本次调用的 system_prompt（不落 checkpoint） |
+| `MemoryInjection` | awrap_model_call | 无条件拼入用户画像/时间线（L1/L2）+ 按当前问题检索相关 Facts（L3），临时拼进本次调用的 system_prompt（不落 checkpoint） |
 | `Guardrail` ⚠️关键顺序 | awrap_tool_call | 工具调用前置权限校验，覆盖全部工具，拒绝返回 error ToolMessage 而非抛异常 |
 | `Sandbox` | awrap_tool_call | 获取/释放沙箱实例（Local 或 Docker） |
 | `ToolAudit` | awrap_tool_call | 工具调用起止时间、耗时、状态日志 |
 | `ToolErrorHandling` | awrap_tool_call | 工具异常统一转为 error ToolMessage，避免整轮中断 |
 | `LoopDetection` | abefore_model | 连续 3 次相同调用短路，防止死循环 |
-| `Summarization` | aafter_agent | 会话结束后按阈值（默认 30 条）压缩历史 |
+| `Summarization` | aafter_agent | 会话结束后按可配置触发条件（messages/tokens/fraction）压缩历史 |
 | `Title` | aafter_agent | 首轮结束后异步生成会话标题 |
-| `MemoryExtraction` | aafter_agent | 会话结束后 fire-and-forget 异步提取长期记忆 |
+| `MemoryExtraction` | aafter_agent | 会话结束后起两个独立 fire-and-forget 任务：提取 Facts（L3）+ 更新用户画像/时间线（L1/L2） |
 | `DatasourceRouting` 业务专属 | awrap_model_call | `datasource_id` 已配置但模型未调用 `query_database` 时注入纠正提示重试一次 |
 | `StreamingModel` ⚠️关键顺序 | awrap_model_call | 绕开内置 `ainvoke`，改用 `.astream()` 逐块拉取并推送 custom 通道 |
 
-前 11 个中间件由 `agent_core/loop.py::build_middlewares()` 统一组装，是可复用的通用流水线；后两个（`DatasourceRouting`/`StreamingModel`）是 `lead_agent.py` 专属追加项——前者因为知道具体工具名 `query_database`，与技能命名耦合，不适合放进通用流水线。
+前 12 个中间件由 `agent_core/loop.py::build_middlewares()` 统一组装，是可复用的通用流水线；后两个（`DatasourceRouting`/`StreamingModel`）是 `lead_agent.py` 专属追加项——前者因为知道具体工具名 `query_database`，与技能命名耦合，不适合放进通用流水线。
 
 ---
 
@@ -303,40 +304,63 @@ flowchart TB
 
 ## 十、Memory 系统
 
-三层记忆体系：短期记忆即 LangGraph checkpoint 完整消息历史；长期记忆是跨会话的 Elasticsearch 向量存储；两者之间由压缩机制衔接。
+短期记忆即 LangGraph checkpoint 完整消息历史；长期记忆内部按三层组织（跟"短期
+checkpoint / 长期存储 / 压缩衔接"是两个不同维度的划分，不要混淆）：
+
+- **L1 用户画像**（`work_context`/`personal_context`/`top_of_mind`）—— 用户是谁
+- **L2 时间线**（`recent_months`/`earlier_context`/`long_term_background`）—— 用户做过什么
+- **L3 事实库 Facts** —— 离散、可检索的知识点，`memory_type` 取
+  `preference`/`knowledge`/`context`/`behavior`/`goal` 五分类之一
+
+L1/L2 是随对话持续演进的整段摘要，不参与语义检索，按 `user_id` 整体存取
+（Postgres `user_memory_profile` 表，`UserProfileStore`）；L3 沿用原本的
+Elasticsearch 向量存储，按当前问题做 kNN + Rerank 检索。压缩机制
+（`MemoryCompressor`）介于短期 checkpoint 和长期存储之间，产出的结构化摘要
+写入 L3（`memory_type=summary`，不属于 Facts 五分类）。
 
 ```mermaid
 flowchart LR
     subgraph inject["请求前 — 注入"]
-        Q["最后一条 HumanMessage"] --> KNN["ES kNN 粗召回<br/>candidate_k 条"]
+        U["user_id"] --> PROFILE["UserProfileStore.get()<br/>L1/L2 画像+时间线"]
+        PROFILE --> SP["拼进临时 system_prompt<br/>不落 checkpoint<br/>（画像在前，Facts 在后）"]
+        Q["最后一条 HumanMessage"] --> KNN["ES kNN 粗召回<br/>candidate_k 条（L3）"]
         KNN --> RR["Reranker 精排<br/>top_n 条"]
         RR --> FILTER["min_recall_score<br/>过滤 + token 预算截断"]
-        FILTER --> SP["拼进临时 system_prompt<br/>不落 checkpoint"]
+        FILTER --> SP
     end
 
-    subgraph after["会话结束后 — 提取与压缩"]
-        MSG["本轮完整对话"] --> EXT["MemoryExtractor<br/>LLM 提取 fact/preference/<br/>decision/instruction"]
+    subgraph after["会话结束后 — 提取/更新/压缩"]
+        MSG["本轮完整对话"] --> EXT["MemoryExtractor（L3）<br/>LLM 提取 preference/knowledge/<br/>context/behavior/goal"]
         EXT --> DUP{"与已有记忆<br/>相似度判定"}
         DUP -->|"≥0.92 重复"| SKIP["跳过"]
         DUP -->|"≥0.75 冲突"| ARCHIVE["旧记忆归档<br/>superseded_by=new_id"]
         DUP -->|否则| SAVE["写入 ES<br/>status=pending/active"]
-        MSG --> COMP["MemoryCompressor<br/>超过阈值(30条)时压缩"]
-        COMP --> SUM["结构化摘要 JSON<br/>渲染为 AIMessage 插入 checkpoint"]
+        MSG --> PROF2["UserProfileUpdater（L1/L2）<br/>合并现有画像+本轮对话重写"]
+        PROF2 --> UPSERT["upsert 到 user_memory_profile"]
+        MSG --> COMP["MemoryCompressor<br/>超过阈值时压缩"]
+        COMP --> SUM["结构化摘要 JSON<br/>渲染为 AIMessage 插入 checkpoint<br/>+ 写入 ES（memory_type=summary）"]
     end
 
     subgraph stale["后台周期任务"]
-        SWEEP["MemoryStalenessReviewer<br/>run_once()"] --> ARCH2["sweep_stale()<br/>过期/低重要度且未访问 → archived"]
+        SWEEP["MemoryStalenessReviewer<br/>run_once()"] --> ARCH2["sweep_stale()<br/>过期/低重要度且未访问 → archived<br/>（只扫描 L3，不影响 L1/L2）"]
     end
 ```
 
-*注入路径是同步的、请求内联的（`MemoryInjectionMiddleware`）；提取与压缩是异步的、会话收尾后 fire-and-forget（`MemoryExtractionMiddleware` / `SummarizationMiddleware`）；陈旧复核是独立于单次会话的全局后台任务。*
+*注入路径是同步的、请求内联的（`MemoryInjectionMiddleware`）；L3 提取、L1/L2
+更新、压缩都是异步的、会话收尾后各自独立的 fire-and-forget 任务
+（`MemoryExtractionMiddleware` 同时起 Facts 提取和画像更新两个任务，互不
+依赖；`SummarizationMiddleware` 独立触发压缩）；陈旧复核是独立于单次会话的
+全局后台任务。*
 
 ### 关键设计点
 
+- **L1/L2 是整段重写，不是增量 diff** — `UserProfileUpdater` 每次把"现有画像/
+  时间线 + 本轮对话"整体喂给模型，产出重写后的完整内容，旧内容是否保留由
+  模型判断，不做程序化的字段合并。
 - **摘要以 AIMessage 插入** — 而非 SystemMessage，因为 Qwen/vLLM 的 chat template 要求 system 消息必须在最前面。
-- **敏感信息拦截** — `save()`/`update()` 前经 `contains_sensitive_info()` 正则规则检测（API key、连接串、身份证、银行卡等）。
-- **降级策略** — Reranker 调用失败时降级为纯 kNN 排序结果；审计写入失败静默降级，不拖垮主流程。
-- **陈旧归档非物理删除** — `sweep_stale()` 全量扫描（不分 user_id），归档条件满足任一：`expires_at` 已过期，或重要度低于阈值且访问次数为 0 且创建时间早于 `max_age_days`。
+- **敏感信息拦截** — `save()`/`update()` 前经 `contains_sensitive_info()` 正则规则检测（API key、连接串、身份证、银行卡等），只覆盖 L3，L1/L2 当前没有接入敏感信息过滤。
+- **降级策略** — Reranker 调用失败时降级为纯 kNN 排序结果；审计写入失败静默降级，不拖垮主流程；L1/L2 更新失败只记 warning，不影响 L3 提取或主对话流程。
+- **陈旧归档非物理删除** — `sweep_stale()` 全量扫描 L3（不分 user_id），归档条件满足任一：`expires_at` 已过期，或重要度低于阈值且访问次数为 0 且创建时间早于 `max_age_days`；L1/L2 是单行 upsert，没有陈旧归档的概念。
 
 ---
 
@@ -350,6 +374,7 @@ flowchart LR
 | `message_store.py` | `conversation_messages` | REST 历史查询用的冗余消息副本（含 thinking/tool_calls/references），与 checkpointer 独立维护 |
 | `memory_audit_store.py` | `memory_audit_logs` | 记忆操作审计日志（辅助能力，失败静默降级） |
 | `memory_jobs_store.py` | `memory_jobs` | 记忆后处理任务状态流转，供崩溃恢复 |
+| `user_profile_store.py` | `user_memory_profile` | 用户画像与时间线（记忆体系 L1/L2），`user_id` 主键，整行 upsert |
 | `skill_settings_store.py` | `user_skill_settings` | 按用户技能禁用记录（只存禁用，默认全开） |
 | `tool_permission_store.py` | `user_tool_permissions` | 按用户工具级权限拒绝记录 |
 
