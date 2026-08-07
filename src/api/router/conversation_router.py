@@ -21,6 +21,7 @@ from src.schema.conversation_schema import (
     ConversationResponse,
     ConversationUpdate,
     FileItem,
+    MessageFeedbackUpdate,
     MessageItem,
 )
 from src.storage.checkpoint_cleanup import get_checkpoint_cleanup
@@ -66,13 +67,39 @@ async def get_messages(conversation_id: str, user_id: str) -> ApiResponse:
     rows = await get_message_store().get_messages(conversation_id)
     messages = [
         MessageItem(
-            role=row["role"], content=row["content"], thinking_content=row["thinking_content"],
-            tool_calls=row["tool_calls"], references=row["references"],
+            id=row["id"], role=row["role"], content=row["content"], thinking_content=row["thinking_content"],
+            tool_calls=row["tool_calls"], references=row["references"], feedback=row["feedback"],
         )
         for row in rows
         if row["role"] in _VISIBLE_MESSAGE_ROLES
     ]
     return success(ConversationHistory(conversation_id=conversation_id, messages=messages))
+
+
+@router.put(
+    "/{conversation_id}/messages/{message_id}/feedback",
+    response_model=ApiResponse[None],
+    summary="对一条 AI 回复点赞/点踩",
+)
+async def set_message_feedback(
+    conversation_id: str, message_id: int, user_id: str, body: MessageFeedbackUpdate,
+) -> ApiResponse:
+    """设置或清除一条 assistant 消息的点赞/点踩反馈。
+
+    再次点击同一个反馈按钮时，前端传 `feedback=null` 表示取消——这里不做
+    "自动切换"判断，切换逻辑由前端根据当前显示状态决定传什么值。
+    """
+    if body.feedback is not None and body.feedback not in ("like", "dislike"):
+        raise HTTPException(status_code=400, detail="feedback 只能是 like/dislike/null")
+
+    conversation = await get_conversation_store().get(conversation_id, user_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND_MESSAGE)
+
+    ok = await get_message_store().set_feedback(message_id, conversation_id, body.feedback)
+    if not ok:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    return success(msg="已更新")
 
 
 @router.put("/{conversation_id}", response_model=ApiResponse[ConversationResponse], summary="修改会话标题")

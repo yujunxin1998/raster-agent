@@ -60,11 +60,19 @@ class ReferenceSource(BaseModel):
 class MessageItem(BaseModel):
     """会话历史里的一条消息。"""
 
+    id: Optional[int] = Field(None, description="消息 ID，前端据此关联点赞/点踩反馈与重新生成")
     role: str = Field(..., description="user | assistant | system")
     content: str
     thinking_content: Optional[str] = None
     tool_calls: Optional[list[ToolCallRecord]] = None
     references: Optional[list[ReferenceSource]] = None
+    feedback: Optional[str] = Field(None, description="like | dislike | null，仅 assistant 消息可能有值")
+
+
+class MessageFeedbackUpdate(BaseModel):
+    """`PUT /conversations/{id}/messages/{message_id}/feedback` 请求体。"""
+
+    feedback: Optional[str] = Field(None, description="like | dislike，传 null 表示取消已有反馈")
 
 
 class ConversationHistory(BaseModel):

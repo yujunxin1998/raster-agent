@@ -39,6 +39,9 @@ class MessageStore:
             'ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS "references" TEXT'
         )
         await self._pool.execute(
+            "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS feedback TEXT"
+        )
+        await self._pool.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_conv ON conversation_messages(conversation_id, created_at ASC)"
         )
         logger.info("[MessageStore] 初始化完成")
@@ -51,7 +54,7 @@ class MessageStore:
         thinking_content: Optional[str] = None,
         tool_calls: Optional[list] = None,
         references: Optional[list] = None,
-    ) -> None:
+    ) -> Optional[int]:
         """新增一条消息记录。
 
         Args:
@@ -62,15 +65,17 @@ class MessageStore:
             tool_calls: 本轮工具调用记录列表，序列化为 JSON 文本存储。
             references: 本轮引用来源列表，序列化为 JSON 文本存储。
 
-        消息持久化失败不应该打断已经生成/返回给用户的回复，因此吞掉异常，
-        只记 warning 日志。
+        Returns:
+            新记录的自增 ID；写入失败时返回 None（不影响已生成/返回给用户的
+            回复，只记 warning 日志）。前端用这个 ID 关联点赞/点踩反馈。
         """
         try:
-            await self._pool.execute(
+            return await self._pool.fetchval(
                 """
                 INSERT INTO conversation_messages
                     (conversation_id, role, content, thinking_content, tool_calls, "references")
                 VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id
                 """,
                 conversation_id, role, content, thinking_content,
                 json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
@@ -78,6 +83,7 @@ class MessageStore:
             )
         except Exception as exc:
             logger.warning(f"[MessageStore] 消息写入失败 conversation_id={conversation_id} role={role} error={exc}")
+            return None
 
     async def get_messages(self, conversation_id: str) -> list[dict]:
         """按会话查询全部消息，按 created_at 升序。
@@ -90,7 +96,7 @@ class MessageStore:
         """
         try:
             rows = await self._pool.fetch(
-                'SELECT role, content, thinking_content, tool_calls, "references", created_at '
+                'SELECT id, role, content, thinking_content, tool_calls, "references", feedback, created_at '
                 "FROM conversation_messages WHERE conversation_id = $1 ORDER BY created_at ASC",
                 conversation_id,
             )
@@ -113,6 +119,44 @@ class MessageStore:
             conversation_id: 会话 ID。
         """
         await self._pool.execute("DELETE FROM conversation_messages WHERE conversation_id = $1", conversation_id)
+
+    async def delete_last_assistant_message(self, conversation_id: str) -> None:
+        """删除某会话下最新的一条 assistant 消息，供"重新生成"覆盖旧回复使用。
+
+        Args:
+            conversation_id: 会话 ID。
+
+        没有匹配记录时静默跳过（比如上一轮生成中途失败、从未写入过 assistant
+        记录的场景），不视为异常。
+        """
+        await self._pool.execute(
+            """
+            DELETE FROM conversation_messages
+            WHERE id = (
+                SELECT id FROM conversation_messages
+                WHERE conversation_id = $1 AND role = 'assistant'
+                ORDER BY created_at DESC LIMIT 1
+            )
+            """,
+            conversation_id,
+        )
+
+    async def set_feedback(self, message_id: int, conversation_id: str, feedback: Optional[str]) -> bool:
+        """设置/清除一条消息的点赞点踩反馈。
+
+        Args:
+            message_id: 消息 ID。
+            conversation_id: 归属会话 ID，用于校验消息确实属于该会话，防止跨会话越权改写。
+            feedback: `"like"`/`"dislike"`，传 `None` 表示清除已有反馈（取消点赞/点踩）。
+
+        Returns:
+            是否命中并更新了一条记录；`message_id` 不存在或不属于该会话时返回 False。
+        """
+        result = await self._pool.execute(
+            "UPDATE conversation_messages SET feedback = $1 WHERE id = $2 AND conversation_id = $3",
+            feedback, message_id, conversation_id,
+        )
+        return result.split()[-1] != "0"
 
 
 _store: MessageStore | None = None

@@ -7,9 +7,10 @@
     - REST 层（`chat_router.py`）消费完生成器后只读 `ChatTurnResult`，不转发事件。
     - WS 层（`chat_ws.py`）把每个 yield 的事件原样转发给客户端。
 
-记忆注入/提取/压缩/标题生成不需要在这里手写——那些是 Lead Agent 中间件流水线
-（`MemoryInjectionMiddleware`/`MemoryExtractionMiddleware`/`SummarizationMiddleware`/
-`TitleMiddleware`）的职责，`build_lead_agent()` 组装时已经自动带上。
+记忆注入/提取/压缩/标题生成/悬空工具调用修复都不需要在这里手写——那些是 Lead
+Agent 中间件流水线（`MemoryInjectionMiddleware`/`MemoryExtractionMiddleware`/
+`SummarizationMiddleware`/`TitleMiddleware`/`DanglingToolCallMiddleware`）的
+职责，`build_lead_agent()` 组装时已经自动带上。
 """
 from __future__ import annotations
 
@@ -21,10 +22,10 @@ from typing import Any, AsyncGenerator, Optional
 
 from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langgraph.graph.message import RemoveMessage
 from loguru import logger
 
 from src.agent_core.agents.checkpointer import get_checkpointer
-from src.agent_core.agents.dangling_tool_calls import sanitize_dangling_tool_calls
 from src.agent_core.agents.lead_agent import build_lead_agent, resolve_recursion_limit
 from src.agent_core.eval.emitter import EvalEventEmitter
 from src.agent_core.middlewares.context import AgentRuntimeContext
@@ -267,15 +268,102 @@ async def run_chat_turn(
         conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
     )
 
-    await sanitize_dangling_tool_calls(agent, config)
-
     message_with_attachments = await _build_message_with_attachments(conversation_id, message, file_ids)
 
+    async for event in _stream_agent_turn(
+        agent, [HumanMessage(content=message_with_attachments)], config, context, emitter, result, thinking=thinking,
+    ):
+        yield event
+
+
+def _find_last_human_index(messages: list) -> Optional[int]:
+    """返回消息列表里最后一条 `HumanMessage` 的下标；不存在时返回 `None`。"""
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            return index
+    return None
+
+
+async def run_regenerate_turn(
+    *,
+    conversation_id: str,
+    user_id: str,
+    thinking: bool = False,
+    datasource_id: Optional[str] = None,
+    emitter: Optional[EvalEventEmitter] = None,
+    result: ChatTurnResult,
+) -> AsyncGenerator[dict, None]:
+    """重新生成最后一轮 AI 回复。
+
+    跟 `run_chat_turn` 的区别只在于不追加新的 `HumanMessage`：先撤回上一轮
+    留在 checkpoint 里、排在最后一条 `HumanMessage` 之后的全部消息（上一次
+    的 `AIMessage`/`ToolMessage`），保留这条 `HumanMessage` 本身不变，再重新
+    触发一次模型调用——效果等价于"这句话我再问一遍，但不重复计入历史"。
+
+    调用方（`chat_ws.py`）负责在生成器成功耗尽后，把 `conversation_messages`
+    表里对应的旧 assistant 记录换成新生成的这条；这里只负责 checkpoint 这一侧
+    的状态回退和重新推理。
+
+    Args:
+        conversation_id: 会话 ID（同时是 checkpointer 的 thread_id）。
+        user_id: 归属用户 ID。
+        thinking: 是否开启深度思考模式。
+        datasource_id: 数据源 ID，供 `DatasourceRoutingMiddleware` 读取。
+        emitter: Eval 遥测状态机，为空时跳过埋点。
+        result: 调用方传入的累计结果容器，本函数在迭代过程中原地写入。
+
+    Yields:
+        同 `run_chat_turn`。会话里还没有任何一条用户发言时，生成器直接结束、
+        不产出任何事件——没有可重新生成的内容。
+    """
+    agent = build_lead_agent(
+        thinking_enabled=thinking, extra_tools=None, checkpointer=get_checkpointer(), user_id=user_id,
+    )
+    config = {
+        "configurable": {"thread_id": conversation_id, "secrets": {}, "datasource_id": datasource_id},
+        "recursion_limit": resolve_recursion_limit(thinking),
+    }
+    context = AgentRuntimeContext(
+        conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
+    )
+
+    state = await agent.aget_state(config)
+    messages = state.values.get("messages", [])
+    last_human_index = _find_last_human_index(messages)
+    if last_human_index is None:
+        logger.info(f"[chat_pipeline] 会话尚无用户发言，无法重新生成 conversation_id={conversation_id}")
+        return
+
+    to_remove = messages[last_human_index + 1:]
+    if to_remove:
+        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=m.id) for m in to_remove]})
+
+    async for event in _stream_agent_turn(agent, [], config, context, emitter, result, thinking=thinking):
+        yield event
+
+
+async def _stream_agent_turn(
+    agent,
+    input_messages: list,
+    config: dict,
+    context: AgentRuntimeContext,
+    emitter: Optional[EvalEventEmitter],
+    result: ChatTurnResult,
+    thinking: bool = False,
+) -> AsyncGenerator[dict, None]:
+    """驱动一次模型调用（含工具循环），逐个 yield WS 形状的事件。
+
+    `run_chat_turn`（`input_messages` 是新的一条 `[HumanMessage(...)]`）与
+    `run_regenerate_turn`（`input_messages` 是空列表 `[]`，不追加新消息，
+    只在调用前撤回上一轮的 AI 回复）共用这部分事件消费循环——LangGraph 对
+    空列表输入一样会从当前 checkpoint 状态完整跑一遍图，足以重新触发模型
+    调用，不需要为"重新生成"单独写一套消费逻辑。
+    """
     ref_state: dict = {"pending": "", "in_ref": False, "buf": "", "sources": None}
     fallback_sources: list[dict] = []
 
     async for stream_mode, chunk in agent.astream(
-        {"messages": [HumanMessage(content=message_with_attachments)]},
+        {"messages": input_messages},
         config=config, context=context, stream_mode=["messages", "custom"],
     ):
         if stream_mode == "custom":
