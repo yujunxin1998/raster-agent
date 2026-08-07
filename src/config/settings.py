@@ -129,6 +129,14 @@ class SystemConfiguration(BaseSettings):
         "UPLOAD_ALLOWED_EXTENSIONS",
         ".txt,.md,.csv,.json,.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.webp",
     )
+    # 附件是否自动离线转换为 Markdown（.docx/.xlsx/.pdf，见
+    # agent_core/ingestion/document_extractor.py），命名/语义对齐
+    # bytedance/deer-flow 的 uploads.auto_convert_documents 配置项。
+    # 关闭后附件只复制进 workspace/，模型拿到原始二进制文件，多数格式
+    # read_file 会读出乱码——仅用于需要绕开转换开销/排查转换问题的场景。
+    ATTACHMENT_AUTO_CONVERT_DOCUMENTS: bool = (
+        os.getenv("ATTACHMENT_AUTO_CONVERT_DOCUMENTS", "true").lower() == "true"
+    )
 
     # ================ Sandbox（沙箱执行，新增） ===================
     SANDBOX_PROVIDER: str = os.getenv("SANDBOX_PROVIDER", "local")

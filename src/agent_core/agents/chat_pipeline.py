@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any, AsyncGenerator, Optional
 
 from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
@@ -28,9 +30,14 @@ from loguru import logger
 from src.agent_core.agents.checkpointer import get_checkpointer
 from src.agent_core.agents.lead_agent import build_lead_agent, resolve_recursion_limit
 from src.agent_core.eval.emitter import EvalEventEmitter
+from src.agent_core.ingestion import extract_text, is_extractable, is_known_unsupported
 from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.skills import get_skill_manager
 from src.agent_core.tools.tool_filter import tool_filter_registry
+from src.agent_core.workspace.thread_workspace import ThreadWorkspace
+from src.agent_core.workspace.thread_workspace_manager import get_thread_workspace_manager
+from src.common.constants import WorkspaceDirectory
+from src.config.settings import get_settings
 from src.storage.file_store import get_file_store
 
 _TOOL_TYPE_MAP: dict[str, str] = {
@@ -173,15 +180,42 @@ def _tool_type(tool_name: str) -> str:
     return _TOOL_TYPE_MAP.get(tool_name, "custom")
 
 
-async def _build_message_with_attachments(conversation_id: str, message: str, file_ids: Optional[list[str]]) -> str:
-    """把本轮附件的文件名/大小以文本形式追加到用户发言末尾。
+def _unique_workspace_name(workspace: ThreadWorkspace, name: str, file_id: str) -> str:
+    """给定期望的 workspace 内文件名，若已被占用则加 file_id 短前缀去重。"""
+    if not (workspace.workspace_dir / name).exists():
+        return name
+    return f"{file_id[:8]}_{name}"
 
-    只做"让模型知道用户上传了哪些文件、下载路径是什么"的最小可用版本，不
-    解析二进制文件内容（PDF/图片等的自动解析属于后续增强，见设计文档待办）。
+
+async def _build_message_with_attachments(
+    conversation_id: str, user_id: str, message: str, file_ids: Optional[list[str]]
+) -> str:
+    """把本轮附件复制进沙箱工作区，并把文件名/大小/工具可用路径追加到用户发言末尾。
+
+    `/conversations/{id}/uploads/{file_id}` 是给前端下载用的 HTTP 路由路径，
+    不是沙箱工具（read_file/run_python/run_command）能访问的路径——那几个
+    工具的 cwd 固定在 workspace/ 子目录（见 LocalSandbox.execute_command），
+    uploads/ 是它的同级目录，天然够不到。之前直接把 HTTP 路径当"下载路径"
+    告诉模型，模型会照抄去当文件路径用，必然 FileNotFoundError。这里改为把
+    附件实体复制一份到 workspace/ 根目录（原始文件名，重名加 file_id 短前缀
+    去重），提示文案里给的也是 workspace 内的相对路径，模型拿到的路径字符串
+    和沙箱工具实际能解析的协议保持一致。
+
+    .docx/.xlsx/.pdf 这类结构化二进制格式，`read_file` 直接读会乱码——沙箱
+    没有外网权限，指望模型运行时 `pip install python-docx` 自己解析总是
+    走不通（见 `agent_core/ingestion/document_extractor.py` 模块文档）。
+    `ATTACHMENT_AUTO_CONVERT_DOCUMENTS` 开启时（默认开启），额外用预装的
+    纯 Python 库离线解析出一份同名 `.md`，提示文案指向这份转换后的文本，
+    模型不需要处理原始二进制格式；解析失败（如扫描版 PDF 没有文字层）不
+    阻断对话，把原因原样告诉模型，让它能对用户给出准确解释，而不是自己
+    盲目重试。已知无法解析的旧格式（.doc/.xls）同理，直接给出"换个格式
+    重新上传"的建议。开关关闭时跳过转换，模型只拿到原始二进制文件。
+
     file_id 不存在或不属于该会话的静默跳过，不阻断本轮对话。
 
     Args:
         conversation_id: 会话 ID，用于附件归属校验。
+        user_id: 归属用户 ID，用于定位会话工作区目录。
         message: 用户原始发言文本。
         file_ids: 本轮携带的附件文件 ID 列表，可能为空。
 
@@ -195,11 +229,45 @@ async def _build_message_with_attachments(conversation_id: str, message: str, fi
     if not files:
         return message
 
+    workspace = get_thread_workspace_manager().get_or_create(conversation_id, user_id)
+    auto_convert = get_settings().ATTACHMENT_AUTO_CONVERT_DOCUMENTS
+
     lines = ["", "【本轮附件】"]
     for row in files:
         size_kb = row["size_bytes"] / 1024
-        download_path = f"/conversations/{conversation_id}/uploads/{row['id']}"
-        lines.append(f"- {row['original_name']}（{size_kb:.1f}KB，{row['content_type']}，下载路径：{download_path}）")
+        original_name = row["original_name"]
+        extension = PurePosixPath(original_name).suffix.lower()
+
+        workspace_name = _unique_workspace_name(workspace, original_name, row["id"])
+        source = workspace.resolve(row["stored_name"], WorkspaceDirectory.UPLOADS)
+        dest = workspace.resolve(workspace_name, WorkspaceDirectory.WORKSPACE)
+        shutil.copyfile(source, dest)
+
+        note = f"可通过 read_file/run_python 等工具用相对路径 \"{workspace_name}\" 访问"
+        if is_extractable(extension):
+            if not auto_convert:
+                note = "该格式无法被 read_file 直接读取（会乱码），附件自动转换已关闭，需要用户提供文本内容"
+            else:
+                result = extract_text(source, extension)
+                if result.ok:
+                    md_name = _unique_workspace_name(
+                        workspace, f"{PurePosixPath(workspace_name).stem}.md", row["id"] + "-md"
+                    )
+                    workspace.resolve(md_name, WorkspaceDirectory.WORKSPACE).write_text(
+                        result.text, encoding="utf-8"
+                    )
+                    note = (
+                        f"该格式无法被 read_file 直接读取（会乱码），已离线转换出 Markdown 副本，"
+                        f"请用 read_file 读取相对路径 \"{md_name}\""
+                    )
+                else:
+                    note = f"已上传但无法自动提取文字内容（{result.message}）"
+        else:
+            unsupported_reason = is_known_unsupported(extension)
+            if unsupported_reason:
+                note = f"暂不支持解析该格式（{unsupported_reason}）"
+
+        lines.append(f"- {original_name}（{size_kb:.1f}KB，{row['content_type']}，{note}）")
     return message + "\n".join(lines)
 
 
@@ -268,7 +336,7 @@ async def run_chat_turn(
         conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
     )
 
-    message_with_attachments = await _build_message_with_attachments(conversation_id, message, file_ids)
+    message_with_attachments = await _build_message_with_attachments(conversation_id, user_id, message, file_ids)
 
     async for event in _stream_agent_turn(
         agent, [HumanMessage(content=message_with_attachments)], config, context, emitter, result, thinking=thinking,

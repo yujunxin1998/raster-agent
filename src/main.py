@@ -42,6 +42,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from loguru import logger
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from src.agent_core.agents.checkpointer import init_checkpointer
 from src.agent_core.eval.emitter import aclose_emitter_redis
@@ -232,7 +234,26 @@ async def lifespan(app: FastAPI):
     logger.info("MemoryManager 初始化完成")
 
     # 8. Lead Agent 会话持久化 checkpointer（连接生命周期绑定在本 async with 块内）
-    async with AsyncPostgresSaver.from_conn_string(settings.DATABASE_URL) as checkpointer:
+    #
+    # 不用 AsyncPostgresSaver.from_conn_string()：它内部是一条裸 AsyncConnection，
+    # 没有任何重连机制——一旦这条连接因空闲超时/网络抖动/数据库重启被服务端或
+    # 中间网络设备断开，psycopg 会把它标记为 [BAD]，之后每一次 checkpointer 调用
+    # 都会立刻抛 `psycopg.OperationalError: the connection is closed`，且永远
+    # 不会自愈，只能重启进程（实际发生过，见 WS 流式响应异常日志）。改用
+    # `psycopg_pool.AsyncConnectionPool`：`AsyncPostgresSaver` 原生支持传入连接池
+    # （见 `langgraph.checkpoint.postgres._ainternal.Conn` 的类型定义），连接池
+    # 自带健康检查（`check=AsyncConnectionPool.check_connection`），借出连接前
+    # 会先探活，坏连接自动丢弃重建，不再需要整个进程重启才能恢复。
+    checkpoint_pool = AsyncConnectionPool(
+        conninfo=settings.DATABASE_URL,
+        min_size=1,
+        max_size=10,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        check=AsyncConnectionPool.check_connection,
+        open=False,
+    )
+    async with checkpoint_pool:
+        checkpointer = AsyncPostgresSaver(conn=checkpoint_pool)
         await checkpointer.setup()
         init_checkpointer(checkpointer)
         logger.info("Checkpointer 初始化完成")

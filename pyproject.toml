@@ -22,6 +22,11 @@ dependencies = [
     "langchain_deepseek==1.1.0",
     "langgraph==1.2.5",
     "langgraph-checkpoint-postgres==3.1.0",
+    # psycopg/psycopg-pool：langgraph-checkpoint-postgres 的运行时依赖，显式声明
+    # 版本避免上游静默升级改变连接池行为（main.py 里 Checkpointer 直接用到
+    # AsyncConnectionPool，见其初始化处的注释）。
+    "psycopg==3.3.4",
+    "psycopg-pool==3.3.1",
     "elasticsearch==8.11.0",
     "python-dotenv==1.0.0",
     "httpx==0.28.1",
@@ -30,6 +35,11 @@ dependencies = [
     "loguru==0.7.2",
     "redis==5.0.1",
     "docker==7.1.0",
+    # 附件文档解析（agent_core/ingestion/document_extractor.py）：离线把
+    # .docx/.xlsx/.pdf 转成纯文本，不依赖沙箱的网络访问。
+    "python-docx==1.1.2",
+    "openpyxl==3.1.5",
+    "pypdf==5.1.0",
 ]
 
 [project.optional-dependencies]
