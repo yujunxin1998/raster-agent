@@ -194,7 +194,7 @@ class ElasticsearchMemoryStore(BaseMemoryStore):
         content: str,
         user_id: str = "default",
         conversation_id: Optional[str] = None,
-        memory_type: str = "fact",
+        memory_type: str = "context",
         importance: int = 5,
         source: str = "tool",
         trace_id: Optional[str] = None,

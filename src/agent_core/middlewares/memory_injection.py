@@ -4,6 +4,12 @@
 检索长期记忆，构造临时的提示词内容注入本轮模型调用，不写入持久化历史
 （沿用现有做法——`request.system_prompt` 只对本次 `handler(request)` 生效，
 不会被 checkpoint 持久化，天然满足"不落库"这个约束）。
+
+三层记忆架构下这里注入两块内容，顺序固定"画像在前、细节在后"：
+1. 用户画像 + 时间线（L1/L2，`get_profile_context`）—— 无条件注入，不依赖
+   当前这句话问了什么，代表"这个用户是谁、最近在做什么"的稳定背景。
+2. 相关 Facts（L3，`get_relevant_context`）—— 按当前问题做语义检索，只有
+   检索到相关内容才注入，是原来就有的逻辑，未改动。
 """
 from __future__ import annotations
 
@@ -41,12 +47,23 @@ class MemoryInjectionMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
         context = request.runtime.context
         query = self._last_human_text(request.messages)
 
-        if context is not None and context.user_id and query:
-            memory_context = await self._memory_manager.get_relevant_context(
-                query=query, user_id=context.user_id, conversation_id=context.conversation_id,
-            )
-            if memory_context:
-                merged_prompt = f"{request.system_prompt}\n\n{memory_context}" if request.system_prompt else memory_context
+        if context is not None and context.user_id:
+            blocks = []
+
+            profile_context = await self._memory_manager.get_profile_context(user_id=context.user_id)
+            if profile_context:
+                blocks.append(profile_context)
+
+            if query:
+                memory_context = await self._memory_manager.get_relevant_context(
+                    query=query, user_id=context.user_id, conversation_id=context.conversation_id,
+                )
+                if memory_context:
+                    blocks.append(memory_context)
+
+            if blocks:
+                combined = "\n\n".join(blocks)
+                merged_prompt = f"{request.system_prompt}\n\n{combined}" if request.system_prompt else combined
                 request = request.override(system_prompt=merged_prompt)
 
         return await handler(request)

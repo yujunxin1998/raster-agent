@@ -16,6 +16,7 @@ from src.schema.memory_schema import (
     MemoryResponse,
     MemorySearchQuery,
     MemoryUpdate,
+    UserProfileResponse,
 )
 from src.storage.memory_audit_store import get_memory_audit_store
 
@@ -26,6 +27,33 @@ _DEFAULT_UNAVAILABLE_MESSAGE = "记忆服务暂不可用，请稍后重试"
 
 def _dependency_unavailable(detail: str = _DEFAULT_UNAVAILABLE_MESSAGE) -> HTTPException:
     return HTTPException(status_code=503, detail=detail)
+
+
+@router.get("/profile", response_model=ApiResponse[UserProfileResponse], summary="查询用户画像与时间线")
+async def get_user_profile(user_id: str) -> ApiResponse:
+    """查询用户画像与时间线（三层记忆架构的 L1/L2，只读）。
+
+    还没生成过画像时返回全空字段而不是 404——这是新用户的正常状态，不是异常。
+    """
+    try:
+        profile = await get_memory_manager().get_profile(user_id)
+    except Exception as exc:
+        logger.warning(f"[MemoryAPI] get user profile failed user_id={user_id}: {exc}")
+        raise _dependency_unavailable() from exc
+
+    if profile is None:
+        return success(UserProfileResponse())
+
+    updated_at = profile.get("updated_at")
+    return success(UserProfileResponse(
+        work_context=profile.get("work_context", ""),
+        personal_context=profile.get("personal_context", ""),
+        top_of_mind=profile.get("top_of_mind", ""),
+        recent_months=profile.get("recent_months", ""),
+        earlier_context=profile.get("earlier_context", ""),
+        long_term_background=profile.get("long_term_background", ""),
+        updated_at=updated_at.isoformat() if updated_at else None,
+    ))
 
 
 @router.get("/", response_model=ApiResponse[list[MemoryResponse]], summary="列出用户所有长期记忆")

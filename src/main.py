@@ -53,6 +53,7 @@ from src.agent_core.memory import (
     MemoryExtractor,
     MemoryManager,
     MemoryStalenessReviewer,
+    UserProfileUpdater,
     init_memory_manager,
 )
 from src.agent_core.sandbox import get_sandbox_provider, init_docker_sandbox_provider, init_local_sandbox_provider
@@ -77,6 +78,7 @@ from src.storage.memory_jobs_store import init_memory_jobs_store
 from src.storage.message_store import init_message_store
 from src.storage.skill_settings_store import init_skill_settings_store
 from src.storage.tool_permission_store import init_tool_permission_store
+from src.storage.user_profile_store import get_user_profile_store, init_user_profile_store
 
 settings = get_settings()
 
@@ -104,16 +106,29 @@ def _build_memory_manager(memory_store: ElasticsearchMemoryStore) -> MemoryManag
         provider=settings.PROVIDER,
         api_key=settings.API_KEY,
         base_url=settings.BASE_URL,
-        default_threshold=settings.MEMORY_COMPRESSION_THRESHOLD,
+        trigger_type=settings.MEMORY_COMPRESSION_TRIGGER_TYPE,
+        trigger_value=settings.MEMORY_COMPRESSION_TRIGGER_VALUE,
         default_keep_recent=settings.MEMORY_KEEP_RECENT,
+        model_max_input_tokens=settings.MEMORY_MODEL_MAX_INPUT_TOKENS,
+    )
+    # 用户画像/时间线（L1/L2）更新跟 Facts 提取是同一类"看这一轮对话、产出
+    # 结构化内容"的任务，复用 MEMORY_EXTRACT_MODEL，不新增模型配置项。
+    profile_updater = UserProfileUpdater(
+        model_name=settings.MEMORY_EXTRACT_MODEL or settings.DEFAULT_MODEL,
+        provider=settings.PROVIDER,
+        api_key=settings.API_KEY,
+        base_url=settings.BASE_URL,
     )
     return MemoryManager(
         store=memory_store,
         extractor=extractor,
         compressor=compressor,
+        profile_store=get_user_profile_store(),
+        profile_updater=profile_updater,
         memory_enabled=settings.MEMORY_ENABLED,
         injection_enabled=settings.MEMORY_INJECTION_ENABLED,
         auto_extract_enabled=settings.MEMORY_AUTO_EXTRACT_ENABLED,
+        profile_update_enabled=settings.MEMORY_PROFILE_UPDATE_ENABLED,
         recall_candidate_k=settings.MEMORY_RECALL_CANDIDATE_K,
         max_recall=settings.MEMORY_MAX_RECALL,
         min_recall_score=settings.MEMORY_MIN_RECALL_SCORE,
@@ -161,6 +176,7 @@ async def lifespan(app: FastAPI):
     await init_conversation_store(pool)
     await init_message_store(pool)
     await init_file_store(pool)
+    await init_user_profile_store(pool)
 
     # 3. 虚拟工作区（按会话隔离目录）
     init_thread_workspace_manager(settings.WORKSPACE_ROOT)

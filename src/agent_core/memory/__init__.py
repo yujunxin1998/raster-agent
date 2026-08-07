@@ -23,6 +23,7 @@ from src.agent_core.memory.memory_manager import (
 )
 from src.agent_core.memory.memory_sensitive_filter import contains_sensitive_info
 from src.agent_core.memory.memory_staleness_reviewer import MemoryStalenessReviewer
+from src.agent_core.memory.user_profile_updater import UserProfileUpdater
 
 __all__ = [
     "BaseMemoryStore",
@@ -35,4 +36,5 @@ __all__ = [
     "get_memory_with_retry",
     "contains_sensitive_info",
     "MemoryStalenessReviewer",
+    "UserProfileUpdater",
 ]

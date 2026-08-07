@@ -31,6 +31,13 @@ class SystemConfiguration(BaseSettings):
     CURRENT_ENV: str = os.getenv("ENVIRONMENT", "development")
     APP_VERSION: str = os.getenv("APP_VERSION", "0.1.0")
     APP_PORT: int = int(os.getenv("APP_PORT", "8080"))
+    # 浏览器能直接访问到本服务的地址（如 http://localhost:8080 或反代后的
+    # https://xxx.com/agent-api），供拼装回复正文里的下载链接（`save_output_file`
+    # 等）使用。留空时这些链接退化为相对路径——只有在前端和本服务同源部署
+    # （反代把两者挂在同一个 origin 下）时相对路径才能正确解析，否则浏览器会
+    # 把它解析成"当前页面（前端 SPA）自己的地址 + 这段路径"而不是本服务的地址，
+    # 点击后打不开。
+    PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
     # ================ 大语言模型环境依赖 ========================
     API_KEY: str = os.getenv("OPENAI_API_KEY", os.getenv("API_KEY", ""))
@@ -71,7 +78,16 @@ class SystemConfiguration(BaseSettings):
     RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "bge-reranker-v2-m3")
 
     # ================ 记忆管理行为参数 ============================
-    MEMORY_COMPRESSION_THRESHOLD: int = int(os.getenv("MEMORY_COMPRESSION_THRESHOLD", "30"))
+    # 压缩触发条件：type 决定看哪个指标，value 是对应阈值。
+    #   messages: 消息条数超过 value（整数）时触发
+    #   tokens:   近似 token 数（count_tokens_approximately）超过 value（整数）时触发
+    #   fraction: 近似 token 数占 MEMORY_MODEL_MAX_INPUT_TOKENS 的比例超过
+    #             value（0~1 小数）时触发
+    MEMORY_COMPRESSION_TRIGGER_TYPE: str = os.getenv("MEMORY_COMPRESSION_TRIGGER_TYPE", "messages")
+    MEMORY_COMPRESSION_TRIGGER_VALUE: float = float(os.getenv("MEMORY_COMPRESSION_TRIGGER_VALUE", "30"))
+    # 仅 fraction 触发类型需要：自部署的 Qwen/vLLM 等模型没有 LangChain 的
+    # profile 机制可以自动探测最大输入 token 数，只能显式配置。
+    MEMORY_MODEL_MAX_INPUT_TOKENS: int = int(os.getenv("MEMORY_MODEL_MAX_INPUT_TOKENS", "32000"))
     MEMORY_KEEP_RECENT: int = int(os.getenv("MEMORY_KEEP_RECENT", "10"))
     MEMORY_RECALL_CANDIDATE_K: int = int(os.getenv("MEMORY_RECALL_CANDIDATE_K", "20"))
     MEMORY_MAX_RECALL: int = int(os.getenv("MEMORY_MAX_RECALL", "5"))
@@ -91,6 +107,9 @@ class SystemConfiguration(BaseSettings):
     MEMORY_INJECTION_ENABLED: bool = os.getenv("MEMORY_INJECTION_ENABLED", "true").lower() == "true"
     MEMORY_TOOL_ENABLED: bool = os.getenv("MEMORY_TOOL_ENABLED", "true").lower() == "true"
     MEMORY_SENSITIVE_FILTER_ENABLED: bool = os.getenv("MEMORY_SENSITIVE_FILTER_ENABLED", "true").lower() == "true"
+    # 用户画像/时间线（L1/L2）实时更新开关，跟 Facts 提取（L3，
+    # MEMORY_AUTO_EXTRACT_ENABLED）各自独立的 LLM 调用，可单独关闭控制成本。
+    MEMORY_PROFILE_UPDATE_ENABLED: bool = os.getenv("MEMORY_PROFILE_UPDATE_ENABLED", "true").lower() == "true"
 
     # ================ Skill 机制 ================================
     SKILLS_DIRS: str = os.getenv("SKILLS_DIRS", "skills/core,skills/public")
@@ -116,6 +135,10 @@ class SystemConfiguration(BaseSettings):
     SANDBOX_COMMAND_TIMEOUT_SECONDS: int = int(os.getenv("SANDBOX_COMMAND_TIMEOUT_SECONDS", "60"))
     SANDBOX_MAX_OUTPUT_BYTES: int = int(os.getenv("SANDBOX_MAX_OUTPUT_BYTES", str(2 * 1024 * 1024)))
     SANDBOX_MAX_MEMORY_MB: int = int(os.getenv("SANDBOX_MAX_MEMORY_MB", "512"))
+    # run_python/run_command 的 stdout/stderr 超过这个行数时，不再把完整内容塞进
+    # 模型上下文——只给一份头尾预览，完整内容落盘到会话 workspace 里，模型需要时
+    # 自己用 read_file 读取（用磁盘 IO 换 token/上下文压力）。
+    SANDBOX_INLINE_OUTPUT_MAX_LINES: int = int(os.getenv("SANDBOX_INLINE_OUTPUT_MAX_LINES", "50"))
     # SANDBOX_PROVIDER=docker 时使用：默认镜像不含 Node.js，涉及 .js 脚本的技能
     # 需要换成自带 node 的镜像；PROJECT_ROOT 用于技能脚本绝对路径在容器内的翻译，
     # 默认取本文件所在项目的根目录，一般不需要覆盖。

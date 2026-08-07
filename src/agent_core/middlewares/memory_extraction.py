@@ -3,6 +3,11 @@
 对应 `src/agent_core/memory/memory_extractor.py`：逻辑完全不变，仍然是
 fire-and-forget——只是触发时机从 `chat_service.py` 手写的
 `asyncio.create_task` 改为中间件的 `aafter_agent` 收尾钩子。
+
+三层记忆架构下这里同一个钩子额外起了第二个独立的 fire-and-forget 任务，
+更新用户画像与时间线（L1/L2，`UserProfileUpdater`）——跟 Facts 提取
+（L3，`MemoryExtractor`）是两次独立的 LLM 调用，互不依赖，一个失败不影响
+另一个。
 """
 from __future__ import annotations
 
@@ -54,6 +59,9 @@ class MemoryExtractionMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
         asyncio.create_task(
             self._extract(user_message, ai_response, context.user_id, context.conversation_id)
         )
+        asyncio.create_task(
+            self._update_profile(user_message, ai_response, context.user_id)
+        )
         return None
 
     async def _extract(self, user_message: str, ai_response: str, user_id: str, conversation_id: str) -> None:
@@ -64,6 +72,14 @@ class MemoryExtractionMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
             )
         except Exception as exc:
             logger.warning(f"[MemoryExtractionMiddleware] 后台提取任务异常，已忽略: {exc}")
+
+    async def _update_profile(self, user_message: str, ai_response: str, user_id: str) -> None:
+        try:
+            await self._memory_manager.update_profile_after_chat(
+                user_message=user_message, ai_response=ai_response, user_id=user_id,
+            )
+        except Exception as exc:
+            logger.warning(f"[MemoryExtractionMiddleware] 后台画像更新任务异常，已忽略: {exc}")
 
     @staticmethod
     def _last_text(messages: list, message_type: type) -> str:

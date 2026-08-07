@@ -27,14 +27,14 @@ class SkillCategory(str, Enum):
 
 
 class MemoryType(str, Enum):
-    """长期记忆的语义分类。"""
+    """长期记忆的语义分类（Facts 层的五分类，对齐三层记忆架构设计）。"""
 
-    FACT = "fact"
     PREFERENCE = "preference"
-    DECISION = "decision"
-    INSTRUCTION = "instruction"
-    CORRECTION = "correction"
-    SUMMARY = "summary"
+    KNOWLEDGE = "knowledge"
+    CONTEXT = "context"
+    BEHAVIOR = "behavior"
+    GOAL = "goal"
+    SUMMARY = "summary"  # 压缩摘要专用（MemoryCompressor 写入），不属于 Facts 五分类
 
 
 class MemoryStatus(str, Enum):

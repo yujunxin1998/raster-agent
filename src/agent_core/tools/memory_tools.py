@@ -24,13 +24,13 @@ _MEMORY_FEATURE_DISABLED_MESSAGE = "记忆功能当前已关闭。"
 async def save_memory(
     content: str,
     config: RunnableConfig,
-    memory_type: str = "fact",
+    memory_type: str = "context",
     importance: int = 5,
 ) -> str:
     """将对话中值得长期保留的信息存入记忆库，供未来对话使用。
 
-    memory_type 可选：fact（客观事实）、preference（偏好习惯）、decision（重要决策）、
-    instruction（用户明确要求长期遵守的规则）、correction（用户纠正过的错误）。
+    memory_type 可选：preference（偏好习惯）、knowledge（专业知识/技能）、
+    context（客观背景事实）、behavior（行为模式）、goal（目标意图/长期规则）。
     importance 范围 1-10，越高越重要。
     """
     settings = get_settings()

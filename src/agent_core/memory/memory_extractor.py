@@ -1,10 +1,17 @@
-"""长期记忆后处理提取器。
+"""长期记忆后处理提取器（三层记忆架构的 L3 Facts）。
 
 原样迁移自 `src/core/memory/extractor.py`，改造为 `MemoryExtractor` 类：
 原模块级函数 `extract_and_save`/`_find_similar`/`_has_remember_keyword`
 分别变为类的公开方法与私有方法，构造参数取代了原来直接读取全局
-`get_settings()` 的做法，便于单测时注入不同配置。判断标准、重复/冲突
-检测、"记住"类关键词兜底逻辑均未改动。
+`get_settings()` 的做法，便于单测时注入不同配置。重复/冲突检测、"记住"类
+关键词兜底逻辑均未改动；提取分类从 fact/preference/decision/instruction/
+correction 改造为 preference/knowledge/context/behavior/goal 五分类（原
+instruction/correction 命中即强制 importance>=8 的特例已删除，改由跟分类
+无关的"记住"类关键词兜底承担"必须记住"语义）。
+
+跟 `user_profile_updater.py`（L1/L2 画像/时间线，随对话持续演进的整段摘要）
+是两套独立的 LLM 调用：这里做的是"从这一轮里挑出值得单独存一条的离散知识
+点"，不做画像/时间线的合并重写。
 """
 from __future__ import annotations
 
@@ -17,14 +24,14 @@ from loguru import logger
 from src.agent_core.memory.base_memory_store import BaseMemoryStore
 from src.agent_core.model import create_chat_model
 
-_EXTRACT_PROMPT_TEMPLATE = """你是一个记忆提取助手。分析下方对话，从用户发言中提取值得长期保留的信息。
+_EXTRACT_PROMPT_TEMPLATE = """你是一个记忆提取助手。分析下方对话，从用户发言中提取值得长期保留的离散知识点。
 
 【提取标准】满足以下任一条件才提取：
-1. 用户个人信息（姓名、职业、所在地、公司、年龄等）→ fact
-2. 用户明确的偏好或习惯 → preference
-3. 用户正在进行的项目、技术选型、架构决策 → decision
-4. 用户明确要求长期遵守的规则（如"以后都用中文回答"、"以后命令直接给完整版本"）→ instruction
-5. 用户明确纠正过 AI 的错误（术语、格式、实现方式、业务规则）→ correction
+1. 用户明确的偏好或习惯（工具选择、代码风格、沟通方式等）→ preference，例："偏好使用 Vim 而非 VS Code"
+2. 用户具备的专业知识/技能（擅长的语言、框架、领域）→ knowledge，例："精通 Rust 和 WebAssembly"
+3. 用户的客观背景事实（姓名、职业、所在地、公司、年龄等）→ context，例："在字节跳动担任高级工程师"
+4. 用户展现出的行为模式（做事习惯、工作流程）→ behavior，例："习惯先写测试再写实现"
+5. 用户明确的目标或意图（计划、规则、要求长期遵守的约定）→ goal，例："计划在 Q2 发布 v2.0"
 
 如果用户发言是确认性的（如"就按你刚才说的方案做"、"可以，按这个来"），请结合"上一轮 AI 回复"理解用户确认/选择的具体内容，再提取。
 
@@ -32,10 +39,8 @@ _EXTRACT_PROMPT_TEMPLATE = """你是一个记忆提取助手。分析下方对�
 
 【输出格式】JSON 数组，无内容则返回 []：
 [
-  {{"content": "提取的记忆内容（简洁陈述句）", "memory_type": "fact|preference|decision|instruction|correction", "importance": 1到10的整数}}
+  {{"content": "提取的记忆内容（简洁陈述句）", "memory_type": "preference|knowledge|context|behavior|goal", "importance": 1到10的整数}}
 ]
-
-instruction 和 correction 一旦命中，importance 不得低于 8（用户明确要求遵守的规则和纠正过的错误应当被强制保留）。
 
 只输出 JSON，不要有任何其他文字。
 
@@ -120,7 +125,7 @@ class MemoryExtractor:
             logger.info(f"[MemoryExtractor] LLM 未提取到内容，但命中'记住'类关键词，规则兜底保存原文 user={user_id}")
             await store.save(
                 content=user_message, user_id=user_id, conversation_id=conversation_id,
-                memory_type="instruction", importance=8, source="extractor",
+                memory_type="goal", importance=8, source="extractor",
                 status="active", trace_id=trace_id,
             )
             return
@@ -172,7 +177,7 @@ class MemoryExtractor:
             if not isinstance(memory, dict):
                 continue
             content = str(memory.get("content", "")).strip()
-            memory_type = memory.get("memory_type", "fact")
+            memory_type = memory.get("memory_type", "context")
             importance = int(memory.get("importance", 5))
 
             if not content or importance < threshold:
@@ -180,9 +185,6 @@ class MemoryExtractor:
             if content in seen_in_batch:
                 continue
             seen_in_batch.add(content)
-
-            if memory_type in ("instruction", "correction"):
-                importance = max(importance, 8)
 
             similar = await self._find_similar(store, content, user_id, memory_type)
             conflict_old_id = self._detect_conflict(similar, content)

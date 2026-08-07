@@ -16,7 +16,7 @@ class MemoryCreate(BaseModel):
 
     user_id: str = Field(..., description="用户ID")
     content: str = Field(..., min_length=1, description="记忆内容")
-    memory_type: str = Field("fact", description="fact | preference | decision | instruction | correction")
+    memory_type: str = Field("context", description="preference | knowledge | context | behavior | goal")
     importance: int = Field(5, ge=1, le=10, description="重要度 1-10")
     conversation_id: Optional[str] = Field(None, description="来源对话ID（可选）")
     expires_at: Optional[datetime] = Field(None, description="过期时间（可选），过期后不再被召回")
@@ -56,6 +56,18 @@ class MemorySearchQuery(BaseModel):
 
     query: str = Field(..., min_length=1, description="检索语句")
     top_n: int = Field(5, ge=1, le=20, description="返回条数")
+
+
+class UserProfileResponse(BaseModel):
+    """用户画像与时间线响应体（三层记忆架构的 L1/L2，只读）。"""
+
+    work_context: str = Field("", description="职业角色、公司、关键项目、主力技术栈")
+    personal_context: str = Field("", description="语言能力、沟通偏好、兴趣领域")
+    top_of_mind: str = Field("", description="当前关注的多个并行焦点，更新频率最高")
+    recent_months: str = Field("", description="近 1-3 个月的详细活动摘要")
+    earlier_context: str = Field("", description="3-12 个月前的重要模式")
+    long_term_background: str = Field("", description="长期不变的基础背景")
+    updated_at: Optional[str] = Field(None, description="最近一次更新时间，还没生成过画像时为 None")
 
 
 class MemoryAuditLogResponse(BaseModel):
