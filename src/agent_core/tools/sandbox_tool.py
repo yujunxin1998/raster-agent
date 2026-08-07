@@ -24,10 +24,20 @@ ToolMessage 而不是中断整轮对话，因此本文件不需要自己 try/exc
 工作区 + 环境变量清洗 + 命令超时/输出截断/POSIX 下的内存上限，跟现有技能脚本
 执行的信任级别完全一致——这几个工具不会引入比技能脚本更强的攻击面，但也没有
 更强；如果之后要接不受信任的任意代码，需要先做 5.3 节提到的容器化沙箱。
+
+`run_python`/`run_command` 的 stdout/stderr 超过 `SANDBOX_INLINE_OUTPUT_MAX_LINES`
+（默认 50 行）时不再整段塞进模型上下文——只给一份头尾预览，完整内容落盘到
+`tool_output/` 目录，模型需要细节时自己用 `read_file` 按需读取（用磁盘 IO 换
+token/上下文压力，见 `_inline_or_offload`）。这和 `SANDBOX_MAX_OUTPUT_BYTES`
+是两层不同的控制：字节级截断是硬上限（超过部分真的丢了，永远拿不回来），
+行数级落盘是软处理（内容完整保留，只是不默认塞进上下文）。
 """
 from __future__ import annotations
 
+import json
 import sys
+import uuid
+from pathlib import PurePosixPath
 from typing import Awaitable, Callable
 
 from langchain_core.runnables import RunnableConfig
@@ -36,8 +46,15 @@ from langchain_core.tools import tool
 from src.agent_core.sandbox import get_sandbox_provider
 from src.agent_core.sandbox.sandbox import CommandResult, Sandbox
 from src.common.constants import WorkspaceDirectory
+from src.config.settings import get_settings
 
 _SANDBOX_UNAVAILABLE_MESSAGE = "当前调用缺少会话上下文（thread_id），无法使用沙箱工具。"
+_TOOL_OUTPUT_DIR = "tool_output"
+
+# 产物后缀是这几种时，返回结果里额外带 <image> 标签（前端 ImageBubble 识别
+# 这个标签渲染成图片预览+下载卡片，见 useChatStore.js::_extractImageBlocks）；
+# 非图片产物（PDF/Excel/zip 等）没有预览的意义，维持原来的纯文本下载链接。
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 
 def _resolve_ids(config: RunnableConfig) -> tuple[str | None, str | None]:
@@ -45,16 +62,51 @@ def _resolve_ids(config: RunnableConfig) -> tuple[str | None, str | None]:
     return configurable.get("thread_id"), configurable.get("user_id")
 
 
-def _format_command_result(result: CommandResult) -> str:
+async def _inline_or_offload(sandbox: Sandbox, stream_name: str, text: str) -> str:
+    """长输出落盘 + 头尾预览，短输出原样内联返回。
+
+    用磁盘 IO 换模型上下文/token 压力：一次跑飞的循环打印几千行不应该把上下文
+    直接撑爆，但完整内容也不能真的丢掉——模型确实需要看细节时，可以自己用
+    `read_file` 按需读取落盘的完整内容，比"要么全塞进上下文、要么整体截断丢弃"
+    这两个极端都更合理。
+
+    Args:
+        sandbox: 当前会话的沙箱实例，落盘用。
+        stream_name: "stdout" 或 "stderr"，用于落盘文件名和提示文案。
+        text: 该输出流的完整文本（已经过 `SANDBOX_MAX_OUTPUT_BYTES` 字节级截断，
+            这里只处理行数）。
+
+    Returns:
+        未超过行数阈值时原样返回；超过时返回"头尾预览 + 落盘路径提示"文本。
+    """
+    max_lines = get_settings().SANDBOX_INLINE_OUTPUT_MAX_LINES
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+
+    half = max_lines // 2
+    head, tail = lines[:half], lines[-half:]
+    omitted = len(lines) - len(head) - len(tail)
+    path = f"{_TOOL_OUTPUT_DIR}/{uuid.uuid4().hex[:8]}_{stream_name}.log"
+    await sandbox.write_file(path, text)
+
+    preview = "\n".join(head) + f"\n...(中间省略 {omitted} 行)...\n" + "\n".join(tail)
+    return (
+        f"[{stream_name} 共 {len(lines)} 行，超过 {max_lines} 行预览上限，"
+        f"仅展示头尾，完整内容已保存到 {path}，需要时用 read_file 读取]\n{preview}"
+    )
+
+
+async def _format_command_result(sandbox: Sandbox, result: CommandResult) -> str:
     lines = [f"status={result.status.value} return_code={result.return_code}"]
     if result.truncated:
         lines.append("[警告] stdout 超过输出上限，已截断")
     stdout = result.stdout_text().strip()
     stderr = result.stderr_text().strip()
     if stdout:
-        lines.append(f"--- stdout ---\n{stdout}")
+        lines.append(f"--- stdout ---\n{await _inline_or_offload(sandbox, 'stdout', stdout)}")
     if stderr:
-        lines.append(f"--- stderr ---\n{stderr}")
+        lines.append(f"--- stderr ---\n{await _inline_or_offload(sandbox, 'stderr', stderr)}")
     return "\n".join(lines)
 
 
@@ -95,12 +147,24 @@ async def read_file(path: str, config: RunnableConfig) -> str:
 
 @tool
 async def save_output_file(path: str, content: str, config: RunnableConfig) -> str:
-    """把最终产物（图表、生成的文档等，不是中间过程文件）保存到本次会话的产物目录，返回可下载链接。"""
+    """把最终产物（图表、生成的文档等，不是中间过程文件）保存到本次会话的产物目录，返回可下载链接。
+
+    产物是图片格式（.png/.jpg/.jpeg/.gif/.webp/.svg）时，返回结果里会带一个
+    `<image>` 标签——回复正文里原样保留这个标签（不要拆开转述成普通 Markdown
+    链接），前端会识别并渲染成图片预览卡片。
+    """
 
     async def _run(sandbox: Sandbox) -> str:
         await sandbox.write_file(path, content, directory=WorkspaceDirectory.OUTPUTS)
         conversation_id, _ = _resolve_ids(config)
-        return f"已保存产物 {path}，下载链接：/conversations/{conversation_id}/outputs/{path}"
+        base_url = get_settings().PUBLIC_BASE_URL
+        link = f"{base_url}/conversations/{conversation_id}/outputs/{path}"
+
+        extension = PurePosixPath(path).suffix.lower()
+        if extension in _IMAGE_EXTENSIONS:
+            image_tag = json.dumps({"url": link, "title": PurePosixPath(path).name}, ensure_ascii=False)
+            return f"已保存产物 {path}\n<image>{image_tag}</image>"
+        return f"已保存产物 {path}，下载链接：{link}"
 
     return await _with_sandbox(config, _run)
 
@@ -119,7 +183,7 @@ async def run_python(
     async def _run(sandbox: Sandbox) -> str:
         command = [sys.executable, "-c", code] if code else [sys.executable, file_path]
         result = await sandbox.execute_command(command, timeout=timeout)
-        return _format_command_result(result)
+        return await _format_command_result(sandbox, result)
 
     return await _with_sandbox(config, _run)
 
@@ -132,6 +196,6 @@ async def run_command(command: list[str], config: RunnableConfig, timeout: float
 
     async def _run(sandbox: Sandbox) -> str:
         result = await sandbox.execute_command(command, timeout=timeout)
-        return _format_command_result(result)
+        return await _format_command_result(sandbox, result)
 
     return await _with_sandbox(config, _run)

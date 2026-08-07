@@ -154,7 +154,12 @@ async function main() {
         }
       } else {
         const url = await generateChartUrl(chartType, args);
-        console.log(url);
+        const title = args.title || chartType;
+        // 包一层 <image> 标签而不是裸 URL：前端按这个标签识别渲染成图片预览+
+        // 下载卡片（见 diit-agent-web/src/store/useChatStore.js 的
+        // _extractImageBlocks），跟 <echart> 标签是同一套"脚本输出结构化标记，
+        // 模型原样保留"的约定，不依赖模型自己拼格式。
+        console.log(`<image>${JSON.stringify({ url, title })}</image>`);
       }
     } catch (e) {
       console.error(`Error generating chart for ${tool}: ${e.message}`);

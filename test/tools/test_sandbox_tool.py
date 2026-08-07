@@ -71,12 +71,62 @@ async def test_save_output_file_writes_to_outputs_directory_and_returns_link() -
     sandbox = MagicMock()
     sandbox.write_file = AsyncMock()
     provider = _fake_provider(sandbox)
+    settings = MagicMock(PUBLIC_BASE_URL="")
 
-    with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
+    with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), patch(
+        "src.agent_core.tools.sandbox_tool.get_settings", return_value=settings
+    ):
         result = await save_output_file.coroutine(path="report.md", content="# 结果", config=_config())
 
     sandbox.write_file.assert_awaited_once_with("report.md", "# 结果", directory=WorkspaceDirectory.OUTPUTS)
     assert "/conversations/c1/outputs/report.md" in result
+
+
+async def test_save_output_file_wraps_image_extension_in_image_tag() -> None:
+    """图片后缀返回 `<image>` 标签而不是纯文本下载链接，供前端渲染成预览卡片。"""
+    sandbox = MagicMock()
+    sandbox.write_file = AsyncMock()
+    provider = _fake_provider(sandbox)
+    settings = MagicMock(PUBLIC_BASE_URL="")
+
+    with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), patch(
+        "src.agent_core.tools.sandbox_tool.get_settings", return_value=settings
+    ):
+        result = await save_output_file.coroutine(path="chart.png", content="fake-bytes", config=_config())
+
+    assert "<image>" in result and "</image>" in result
+    assert "/conversations/c1/outputs/chart.png" in result
+    assert "下载链接" not in result
+
+
+async def test_save_output_file_non_image_extension_keeps_plain_link() -> None:
+    sandbox = MagicMock()
+    sandbox.write_file = AsyncMock()
+    provider = _fake_provider(sandbox)
+    settings = MagicMock(PUBLIC_BASE_URL="")
+
+    with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), patch(
+        "src.agent_core.tools.sandbox_tool.get_settings", return_value=settings
+    ):
+        result = await save_output_file.coroutine(path="report.pdf", content="fake-bytes", config=_config())
+
+    assert "<image>" not in result
+    assert "下载链接" in result
+
+
+async def test_save_output_file_prefixes_public_base_url_when_configured() -> None:
+    """`PUBLIC_BASE_URL` 配置后返回绝对链接，避免前端 SPA 把相对路径解析成自己的地址。"""
+    sandbox = MagicMock()
+    sandbox.write_file = AsyncMock()
+    provider = _fake_provider(sandbox)
+    settings = MagicMock(PUBLIC_BASE_URL="http://localhost:8080")
+
+    with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), patch(
+        "src.agent_core.tools.sandbox_tool.get_settings", return_value=settings
+    ):
+        result = await save_output_file.coroutine(path="report.md", content="# 结果", config=_config())
+
+    assert "http://localhost:8080/conversations/c1/outputs/report.md" in result
 
 
 async def test_run_python_rejects_when_both_code_and_file_path_given() -> None:
@@ -145,3 +195,44 @@ async def test_run_command_reports_truncated_output() -> None:
         result = await run_command.coroutine(command=["echo", "hi"], config=_config())
 
     assert "已截断" in result
+
+
+async def test_short_stdout_stays_inline_without_disk_write() -> None:
+    sandbox = MagicMock()
+    stdout = "\n".join(f"line{i}" for i in range(10)).encode()
+    sandbox.execute_command = AsyncMock(
+        return_value=CommandResult(status=SandboxCommandStatus.SUCCESS, return_code=0, stdout=stdout)
+    )
+    sandbox.write_file = AsyncMock()
+    provider = _fake_provider(sandbox)
+
+    with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
+        result = await run_command.coroutine(command=["echo", "hi"], config=_config())
+
+    sandbox.write_file.assert_not_called()
+    assert "line0" in result and "line9" in result
+    assert "tool_output" not in result
+
+
+async def test_long_stdout_gets_offloaded_to_disk_with_head_tail_preview() -> None:
+    sandbox = MagicMock()
+    stdout = "\n".join(f"line{i}" for i in range(200)).encode()
+    sandbox.execute_command = AsyncMock(
+        return_value=CommandResult(status=SandboxCommandStatus.SUCCESS, return_code=0, stdout=stdout)
+    )
+    sandbox.write_file = AsyncMock()
+    provider = _fake_provider(sandbox)
+
+    with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
+        result = await run_command.coroutine(command=["echo", "hi"], config=_config())
+
+    sandbox.write_file.assert_awaited_once()
+    written_path, written_content = sandbox.write_file.await_args.args
+    assert written_path.startswith("tool_output/") and written_path.endswith("_stdout.log")
+    assert written_content.count("\n") == 199  # 完整 200 行内容原样落盘，一行不少
+
+    assert "line0" in result  # 头部预览
+    assert "line199" in result  # 尾部预览
+    assert "line100" not in result  # 中间被省略
+    assert "中间省略" in result
+    assert written_path in result  # 提示文本里带落盘路径

@@ -60,9 +60,9 @@ node ./scripts/generate.js '<payload_json>'
 ```
 
 ### 4. Result Return
-The script will output the URL of the generated chart image.
+The script's stdout is already a `<image>{"url":"...","title":"..."}</image>` tag (not a bare URL) — the frontend recognizes this tag and renders an image preview + download card from it.
 Return the following to the user:
-- The image URL.
+- The `<image>...</image>` tag exactly as printed by the script — copy it verbatim into your reply, do not unwrap it into a plain Markdown link or restate the URL as text.
 - The complete `args` (specification) used for generation.
 
 ## Reference Material
