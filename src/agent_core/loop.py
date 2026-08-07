@@ -1,7 +1,7 @@
 """Agent Loop 中间件流水线组装（设计文档 4.2 节）。
 
 本工程本轮不包含编排层（见仓库根目录 README「本工程范围」）：这里只提供
-`build_middlewares()`，按文档顺序组装 11 个中间件并返回列表，供二期落地
+`build_middlewares()`，按文档顺序组装 12 个中间件并返回列表，供二期落地
 Lead Agent 时传给 `create_agent(model, tools, middleware=build_middlewares(...))`
 使用。`main.py` 目前没有编排层入口，不需要调用本模块。
 
@@ -19,6 +19,7 @@ from langchain.agents.middleware import AgentMiddleware
 
 from src.agent_core.guardrail.guardrail_provider import GuardrailProvider
 from src.agent_core.memory.memory_manager import MemoryManager
+from src.agent_core.middlewares.dangling_tool_call import DanglingToolCallMiddleware
 from src.agent_core.middlewares.guardrail import GuardrailMiddleware
 from src.agent_core.middlewares.input_sanitization import InputSanitizationMiddleware
 from src.agent_core.middlewares.loop_detection import LoopDetectionMiddleware
@@ -58,7 +59,7 @@ def build_middlewares(
     loop_detection_threshold: int = _DEFAULT_LOOP_DETECTION_THRESHOLD,
     on_title_generated: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> list[AgentMiddleware]:
-    """按设计文档 4.2 节的顺序组装 11 个中间件。
+    """按设计文档 4.2 节的顺序组装 12 个中间件。
 
     Args:
         guardrail_provider: 权限校验器，通常传入 `get_guardrail_provider()`。
@@ -77,6 +78,7 @@ def build_middlewares(
         `create_agent(middleware=build_middlewares(...))`。
     """
     return [
+        DanglingToolCallMiddleware(),
         InputSanitizationMiddleware(),
         ThreadDataMiddleware(workspace_manager),
         MemoryInjectionMiddleware(memory_manager),

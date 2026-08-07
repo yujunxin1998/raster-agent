@@ -27,9 +27,9 @@ middlewares）、第二期（**Lead Agent + 委派工具**）均已完成。不�
 | `src/agent_core/guardrail/` | 权限控制，工具调用前置授权 | 新增 |
 | `src/agent_core/sandbox/` | 沙箱执行环境，技能脚本统一经此执行 | 新增 |
 | `src/agent_core/workspace/` | 按会话隔离的虚拟工作区 | 新增 |
-| `src/agent_core/middlewares/` + `src/agent_core/loop.py` | 中间件流水线，11 个 `AgentMiddleware` 子类 + `build_middlewares()`，已接入 `create_agent(...)`（见 `agent_core/agents/lead_agent.py`） | 新增 |
+| `src/agent_core/middlewares/` + `src/agent_core/loop.py` | 中间件流水线，12 个 `AgentMiddleware` 子类 + `build_middlewares()`，已接入 `create_agent(...)`（见 `agent_core/agents/lead_agent.py`） | 新增 |
 | `src/agent_core/model/` | LLM 工厂，参考 DeerFlow 封装：`create_chat_model()` + `PatchedChatDeepSeek`（reasoning_content 多轮续接修复） | 新增 |
-| `src/agent_core/agents/` | Lead Agent 组装 + 委派工具：`lead_agent.py`/`delegation_tools.py`/`sub_agent_factory.py`/`datasource_routing_middleware.py`/`dangling_tool_calls.py`/`checkpointer.py`/`chat_pipeline.py`（REST/WS 共用的对话轮次驱动逻辑） | 新增 |
+| `src/agent_core/agents/` | Lead Agent 组装 + 委派工具：`lead_agent.py`/`delegation_tools.py`/`sub_agent_factory.py`/`datasource_routing_middleware.py`/`checkpointer.py`/`chat_pipeline.py`（REST/WS 共用的对话轮次驱动逻辑） | 新增 |
 | `src/agent_core/eval/` | Redis Streams 可观测性埋点（`emitter.py`/`http_middleware.py`），原样迁移自 `src/core/evaluation/`，简化了旧 Supervisor 多节点图特有的"agent 切换检测"逻辑 | 迁移 + 简化 |
 | `src/storage/` | 持久化层（DAO），asyncpg 原生 SQL，新增 `conversation_store`/`message_store` | 迁移 + 新增 |
 | `src/api/router/` | `/skills`、`/memories`、`/health`、`/chat`（非流式）、`/conversations` REST 接口 | 迁移 + 新增 |
