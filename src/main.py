@@ -193,6 +193,8 @@ async def lifespan(app: FastAPI):
             default_timeout_seconds=settings.SANDBOX_COMMAND_TIMEOUT_SECONDS,
             max_output_bytes=settings.SANDBOX_MAX_OUTPUT_BYTES,
             max_memory_mb=settings.SANDBOX_MAX_MEMORY_MB,
+            max_pids=settings.SANDBOX_MAX_PIDS,
+            network_enabled=settings.SANDBOX_NETWORK_ENABLED,
         )
     else:
         init_local_sandbox_provider(
@@ -301,7 +303,7 @@ app = FastAPI(
 app.add_middleware(EvalMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=settings.CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

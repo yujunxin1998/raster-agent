@@ -32,6 +32,8 @@ class DockerSandboxProvider(SandboxProvider):
         default_timeout_seconds: int,
         max_output_bytes: int,
         max_memory_mb: int,
+        max_pids: int,
+        network_enabled: bool,
     ) -> None:
         """初始化 Docker 沙箱提供者。
 
@@ -51,6 +53,8 @@ class DockerSandboxProvider(SandboxProvider):
         self._default_timeout_seconds = default_timeout_seconds
         self._max_output_bytes = max_output_bytes
         self._max_memory_mb = max_memory_mb
+        self._max_pids = max_pids
+        self._network_enabled = network_enabled
 
     async def acquire(self, conversation_id: str, user_id: str | None = None) -> Sandbox:
         workspace = self._workspace_manager.get_or_create(conversation_id, user_id)
@@ -62,6 +66,8 @@ class DockerSandboxProvider(SandboxProvider):
             default_timeout_seconds=self._default_timeout_seconds,
             max_output_bytes=self._max_output_bytes,
             max_memory_mb=self._max_memory_mb,
+            max_pids=self._max_pids,
+            network_enabled=self._network_enabled,
         )
 
     async def release(self, sandbox: Sandbox) -> None:
@@ -77,6 +83,8 @@ async def init_docker_sandbox_provider(
     default_timeout_seconds: int,
     max_output_bytes: int,
     max_memory_mb: int,
+    max_pids: int,
+    network_enabled: bool,
 ) -> None:
     """应用启动时调用一次，构造 DockerSandboxProvider 并登记为全局单例。
 
@@ -104,6 +112,8 @@ async def init_docker_sandbox_provider(
             default_timeout_seconds=default_timeout_seconds,
             max_output_bytes=max_output_bytes,
             max_memory_mb=max_memory_mb,
+            max_pids=max_pids,
+            network_enabled=network_enabled,
         )
     )
     logger.info(f"[DockerSandboxProvider] 初始化完成 image={image}")

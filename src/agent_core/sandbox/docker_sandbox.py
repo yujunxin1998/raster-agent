@@ -20,18 +20,21 @@ workspace 目录），所以这三个方法直接组合一个 `LocalSandbox` 实
    绝对路径参数等价替换成 `/app` 前缀——这样技能脚本不需要感知自己是被容器
    还是宿主机进程执行。
 
+运行时安全边界：
+- 容器根文件系统只读，只开放会话 workspace 和受限 `/tmp` 写入；项目目录只读。
+- 丢弃全部 Linux capabilities，启用 `no-new-privileges`，限制内存和进程数。
+- 网络默认关闭；只有显式设置 `SANDBOX_NETWORK_ENABLED=true` 才允许容器联网。
+
 已知限制（显式记录而非假装解决）：
 - 默认镜像 `python:3.11-slim` 不含 Node.js，涉及 `.js` 脚本的技能在 Docker
   模式下会失败，需要通过 `DOCKER_SANDBOX_IMAGE` 换成自带 node 的镜像。
-- 暂不支持 `execute_command(stdin=...)` 管道输入（`SkillContentReader` 用它
-  传 JSON 参数给脚本）——docker-py 对已启动容器的 stdin attach 需要走底层
-  socket API，稳定性没有子进程 `communicate()` 有把握，本轮先返回明确的失败
-  说明而不是静默挂起，需要用到 stdin 的场景请使用 `SANDBOX_PROVIDER=local`。
 """
 from __future__ import annotations
 
 import asyncio
 import sys
+import uuid
+from pathlib import Path
 
 from loguru import logger
 
@@ -43,7 +46,7 @@ from src.common.constants import SandboxCommandStatus, WorkspaceDirectory
 
 _CONTAINER_WORKSPACE_PATH = "/workspace"
 _CONTAINER_PROJECT_ROOT_PATH = "/app"
-_STDIN_UNSUPPORTED_MESSAGE = "DockerSandbox 暂不支持 stdin 管道输入，请改用 SANDBOX_PROVIDER=local"
+_CONTAINER_TMP_PATH = "/tmp"
 
 # 容器有自己的文件系统布局，宿主机的这几个变量传进去反而会指错路径（例如
 # Windows 风格的 PATH/HOME 会覆盖镜像自带的 Linux 默认值），需要在清洗后的
@@ -64,6 +67,8 @@ class DockerSandbox(Sandbox):
         default_timeout_seconds: int,
         max_output_bytes: int,
         max_memory_mb: int,
+        max_pids: int,
+        network_enabled: bool,
     ) -> None:
         """初始化 Docker 沙箱。
 
@@ -75,6 +80,8 @@ class DockerSandbox(Sandbox):
             default_timeout_seconds: 命令未显式指定 timeout 时使用的默认超时秒数。
             max_output_bytes: stdout 截断上限。
             max_memory_mb: 容器内存上限（cgroup 真正强制，比 Local 更强）。
+            max_pids: 容器内进程数上限，防止 fork bomb。
+            network_enabled: 是否允许沙箱容器访问网络，默认应关闭。
         """
         self._workspace = workspace
         self._docker_client = docker_client
@@ -83,6 +90,8 @@ class DockerSandbox(Sandbox):
         self._default_timeout_seconds = default_timeout_seconds
         self._max_output_bytes = max_output_bytes
         self._max_memory_mb = max_memory_mb
+        self._max_pids = max_pids
+        self._network_enabled = network_enabled
         self._local = LocalSandbox(
             workspace,
             default_timeout_seconds=default_timeout_seconds,
@@ -125,24 +134,36 @@ class DockerSandbox(Sandbox):
     ) -> CommandResult:
         if not command:
             raise ValueError("command 不能为空")
-        if stdin:
-            logger.warning(f"[DockerSandbox] 暂不支持 stdin 管道输入，已拒绝 command={command}")
-            return CommandResult(
-                status=SandboxCommandStatus.FAILED,
-                return_code=None,
-                stderr=_STDIN_UNSUPPORTED_MESSAGE.encode("utf-8"),
-            )
 
         resolved_timeout = timeout or self._default_timeout_seconds
         resolved_env = self._build_container_env(env)
         translated_command = self._translate_command(command)
 
-        result = await asyncio.to_thread(
-            self._run_container_blocking,
-            translated_command,
-            env=resolved_env,
-            timeout=resolved_timeout,
-        )
+        stdin_path: Path | None = None
+        if stdin is not None:
+            stdin_name = f".sandbox-stdin-{uuid.uuid4().hex}"
+            stdin_path = self._workspace.workspace_dir / stdin_name
+            stdin_path.write_bytes(stdin)
+            # 不拼接用户参数到 shell 字符串；`sh -c` 只负责重定向，原命令通过
+            # 位置参数原样转发，避免命令注入。
+            translated_command = [
+                "sh",
+                "-c",
+                f'exec "$@" < "{_CONTAINER_WORKSPACE_PATH}/{stdin_name}"',
+                "sandbox-stdin",
+                *translated_command,
+            ]
+
+        try:
+            result = await asyncio.to_thread(
+                self._run_container_blocking,
+                translated_command,
+                env=resolved_env,
+                timeout=resolved_timeout,
+            )
+        finally:
+            if stdin_path is not None:
+                stdin_path.unlink(missing_ok=True)
 
         if result.status == SandboxCommandStatus.TIMEOUT:
             logger.warning(f"[DockerSandbox] 命令执行超时 command={command} timeout={resolved_timeout}s")
@@ -185,6 +206,12 @@ class DockerSandbox(Sandbox):
             },
             environment=env,
             mem_limit=f"{self._max_memory_mb}m",
+            pids_limit=self._max_pids,
+            network_disabled=not self._network_enabled,
+            read_only=True,
+            tmpfs={_CONTAINER_TMP_PATH: "rw,noexec,nosuid,size=64m"},
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
             detach=True,
         )
         try:
