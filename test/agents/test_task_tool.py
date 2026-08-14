@@ -7,14 +7,18 @@
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.agent_core.agents.delegation_tools import build_task_tool
 from src.agent_core.agents.subagent_profiles import SubagentProfile
+from src.agent_core.middlewares.context import AgentRuntimeContext
+
+_CONTEXT = AgentRuntimeContext(conversation_id="c1")
 
 
 async def _invoke(tool, **kwargs) -> str:
-    return await tool.coroutine(config={"configurable": {"thread_id": "c1"}}, **kwargs)
+    return await tool.coroutine(runtime=SimpleNamespace(context=_CONTEXT), **kwargs)
 
 
 async def test_unknown_subagent_type_returns_error_without_calling_run_subagent() -> None:
@@ -49,7 +53,7 @@ async def test_known_subagent_type_dispatches_with_profile_config() -> None:
     assert call_kwargs["system_prompt"] == "system prompt text"
     assert call_kwargs["tools"] == fake_tools
     assert call_kwargs["task"] == "查一下天气"
-    assert call_kwargs["config"] == {"configurable": {"thread_id": "c1"}}
+    assert call_kwargs["context"] is _CONTEXT
 
 
 def test_task_tool_description_lists_registered_subagent_types() -> None:

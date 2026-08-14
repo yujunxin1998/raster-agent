@@ -25,10 +25,10 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from loguru import logger
 
+from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.model import create_chat_model
 
 _NO_REPLY_TEMPLATE = "[{agent_name}] 未产生有效回复"
@@ -48,7 +48,7 @@ async def run_subagent(
     system_prompt: str,
     tools: list[BaseTool],
     task: str,
-    config: RunnableConfig,
+    context: AgentRuntimeContext,
 ) -> str:
     """现造一个子 Agent，执行一次性子任务，返回其最终回复文本。
 
@@ -58,20 +58,22 @@ async def run_subagent(
         system_prompt: 子 Agent 的系统提示词。
         tools: 子 Agent 的工具集（见模块 docstring 的安全边界约束）。
         task: 交给子 Agent 处理的具体子任务描述。
-        config: 外层工具调用的 `RunnableConfig`，只有 `configurable` 会透传给
-            子 Agent——不透传 `callbacks`，否则子 Agent 自己的模型/工具调用事件
-            会经由回调传播机制泄漏进外层 `astream_events` 流，污染用户可见的
-            token 流。委派在外层看来应该是一次不透明的工具调用。
+        context: 外层 `task` 工具收到的 `runtime.context`，原样转发给子
+            Agent——子 Agent 只接收 `context`，不接收外层的 `RunnableConfig`
+            （不传 `config` 参数），因此天然不会带上外层的 `callbacks`：子
+            Agent 自己的模型/工具调用事件不会经由回调传播机制泄漏进外层
+            `astream_events` 流。委派在外层看来应该是一次不透明的工具调用。
 
     Returns:
         子 Agent 最终一条 `AIMessage` 的文本内容；子 Agent 未产生有效回复或执行
         异常时返回一段说明文本，不抛出异常。
     """
-    sub_agent = create_agent(model=create_chat_model(), tools=tools, system_prompt=system_prompt)
-    isolated_config: RunnableConfig = {"configurable": dict(config.get("configurable") or {})}
+    sub_agent = create_agent(
+        model=create_chat_model(), tools=tools, system_prompt=system_prompt, context_schema=AgentRuntimeContext,
+    )
     try:
         result: dict[str, Any] = await sub_agent.ainvoke(
-            {"messages": [HumanMessage(content=task)]}, isolated_config
+            {"messages": [HumanMessage(content=task)]}, context=context,
         )
     except Exception as exc:
         logger.error(f"[{agent_name}] 子 Agent 执行异常 task={task!r} error={exc}")

@@ -40,9 +40,10 @@ import uuid
 from pathlib import PurePosixPath
 from typing import Awaitable, Callable
 
-from langchain_core.runnables import RunnableConfig
+from langgraph.prebuilt import ToolRuntime
 from langchain_core.tools import tool
 
+from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.sandbox import get_sandbox_provider
 from src.agent_core.sandbox.sandbox import CommandResult, Sandbox
 from src.common.constants import WorkspaceDirectory
@@ -57,9 +58,8 @@ _TOOL_OUTPUT_DIR = "tool_output"
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 
-def _resolve_ids(config: RunnableConfig) -> tuple[str | None, str | None]:
-    configurable = config.get("configurable", {}) if config else {}
-    return configurable.get("thread_id"), configurable.get("user_id")
+def _resolve_ids(runtime: ToolRuntime[AgentRuntimeContext]) -> tuple[str | None, str | None]:
+    return runtime.context.conversation_id, runtime.context.user_id
 
 
 async def _inline_or_offload(sandbox: Sandbox, stream_name: str, text: str) -> str:
@@ -110,9 +110,11 @@ async def _format_command_result(sandbox: Sandbox, result: CommandResult) -> str
     return "\n".join(lines)
 
 
-async def _with_sandbox(config: RunnableConfig, fn: Callable[[Sandbox], Awaitable[str]]) -> str:
+async def _with_sandbox(
+    runtime: ToolRuntime[AgentRuntimeContext], fn: Callable[[Sandbox], Awaitable[str]],
+) -> str:
     """acquire → 执行 → release 的公共骨架。"""
-    conversation_id, user_id = _resolve_ids(config)
+    conversation_id, user_id = _resolve_ids(runtime)
     if not conversation_id:
         return _SANDBOX_UNAVAILABLE_MESSAGE
 
@@ -125,28 +127,30 @@ async def _with_sandbox(config: RunnableConfig, fn: Callable[[Sandbox], Awaitabl
 
 
 @tool
-async def write_file(path: str, content: str, config: RunnableConfig, overwrite: bool = True) -> str:
+async def write_file(
+    path: str, content: str, runtime: ToolRuntime[AgentRuntimeContext], overwrite: bool = True,
+) -> str:
     """向本次会话的沙箱工作区写入一个文件（相对路径）。文件已存在时默认覆盖，overwrite=False 时若已存在会报错。"""
 
     async def _run(sandbox: Sandbox) -> str:
         await sandbox.write_file(path, content, overwrite=overwrite)
         return f"已写入 {path}（{len(content)} 字符）"
 
-    return await _with_sandbox(config, _run)
+    return await _with_sandbox(runtime, _run)
 
 
 @tool
-async def read_file(path: str, config: RunnableConfig) -> str:
+async def read_file(path: str, runtime: ToolRuntime[AgentRuntimeContext]) -> str:
     """读取本次会话沙箱工作区内某个文件（相对路径）的文本内容。"""
 
     async def _run(sandbox: Sandbox) -> str:
         return await sandbox.read_file(path)
 
-    return await _with_sandbox(config, _run)
+    return await _with_sandbox(runtime, _run)
 
 
 @tool
-async def save_output_file(path: str, content: str, config: RunnableConfig) -> str:
+async def save_output_file(path: str, content: str, runtime: ToolRuntime[AgentRuntimeContext]) -> str:
     """把最终产物（图表、生成的文档等，不是中间过程文件）保存到本次会话的产物目录，返回可下载链接。
 
     产物是图片格式（.png/.jpg/.jpeg/.gif/.webp/.svg）时，返回结果里会带一个
@@ -156,7 +160,7 @@ async def save_output_file(path: str, content: str, config: RunnableConfig) -> s
 
     async def _run(sandbox: Sandbox) -> str:
         await sandbox.write_file(path, content, directory=WorkspaceDirectory.OUTPUTS)
-        conversation_id, _ = _resolve_ids(config)
+        conversation_id, _ = _resolve_ids(runtime)
         base_url = get_settings().PUBLIC_BASE_URL
         link = f"{base_url}/conversations/{conversation_id}/outputs/{path}"
 
@@ -166,12 +170,12 @@ async def save_output_file(path: str, content: str, config: RunnableConfig) -> s
             return f"已保存产物 {path}\n<image>{image_tag}</image>"
         return f"已保存产物 {path}，下载链接：{link}"
 
-    return await _with_sandbox(config, _run)
+    return await _with_sandbox(runtime, _run)
 
 
 @tool
 async def run_python(
-    config: RunnableConfig,
+    runtime: ToolRuntime[AgentRuntimeContext],
     code: str | None = None,
     file_path: str | None = None,
     timeout: float | None = None,
@@ -185,11 +189,13 @@ async def run_python(
         result = await sandbox.execute_command(command, timeout=timeout)
         return await _format_command_result(sandbox, result)
 
-    return await _with_sandbox(config, _run)
+    return await _with_sandbox(runtime, _run)
 
 
 @tool
-async def run_command(command: list[str], config: RunnableConfig, timeout: float | None = None) -> str:
+async def run_command(
+    command: list[str], runtime: ToolRuntime[AgentRuntimeContext], timeout: float | None = None,
+) -> str:
     """在沙箱工作区内执行一条命令（如 pip install、git、node 等）。command 是可执行文件+参数的列表，不支持管道/重定向等 shell 语法。"""
     if not command:
         return "command 不能为空"
@@ -198,4 +204,4 @@ async def run_command(command: list[str], config: RunnableConfig, timeout: float
         result = await sandbox.execute_command(command, timeout=timeout)
         return await _format_command_result(sandbox, result)
 
-    return await _with_sandbox(config, _run)
+    return await _with_sandbox(runtime, _run)

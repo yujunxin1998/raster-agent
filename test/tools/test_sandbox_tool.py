@@ -6,20 +6,17 @@ LocalSandbox 子进程执行。
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.sandbox.sandbox import CommandResult
 from src.agent_core.tools.sandbox_tool import read_file, run_command, run_python, save_output_file, write_file
 from src.common.constants import SandboxCommandStatus, WorkspaceDirectory
 
 
-def _config(thread_id: str | None = "c1", user_id: str | None = "u1") -> dict:
-    configurable: dict = {}
-    if thread_id is not None:
-        configurable["thread_id"] = thread_id
-    if user_id is not None:
-        configurable["user_id"] = user_id
-    return {"configurable": configurable}
+def _runtime(thread_id: str | None = "c1", user_id: str | None = "u1") -> SimpleNamespace:
+    return SimpleNamespace(context=AgentRuntimeContext(conversation_id=thread_id, user_id=user_id))
 
 
 def _fake_provider(sandbox: MagicMock) -> MagicMock:
@@ -31,7 +28,7 @@ def _fake_provider(sandbox: MagicMock) -> MagicMock:
 
 async def test_write_file_missing_thread_id_skips_sandbox_acquire() -> None:
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider") as get_provider:
-        result = await write_file.coroutine(path="a.py", content="print(1)", config=_config(thread_id=None))
+        result = await write_file.coroutine(path="a.py", content="print(1)", runtime=_runtime(thread_id=None))
 
     get_provider.assert_not_called()
     assert "thread_id" in result
@@ -43,7 +40,7 @@ async def test_write_file_acquires_and_releases_sandbox() -> None:
     provider = _fake_provider(sandbox)
 
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
-        result = await write_file.coroutine(path="a.py", content="print(1)", config=_config())
+        result = await write_file.coroutine(path="a.py", content="print(1)", runtime=_runtime())
 
     provider.acquire.assert_awaited_once_with("c1", "u1")
     sandbox.write_file.assert_awaited_once_with("a.py", "print(1)", overwrite=True)
@@ -58,7 +55,7 @@ async def test_read_file_releases_sandbox_even_on_exception() -> None:
 
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
         try:
-            await read_file.coroutine(path="a.py", config=_config())
+            await read_file.coroutine(path="a.py", runtime=_runtime())
             raised = False
         except FileNotFoundError:
             raised = True
@@ -76,7 +73,7 @@ async def test_save_output_file_writes_to_outputs_directory_and_returns_link() -
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), patch(
         "src.agent_core.tools.sandbox_tool.get_settings", return_value=settings
     ):
-        result = await save_output_file.coroutine(path="report.md", content="# 结果", config=_config())
+        result = await save_output_file.coroutine(path="report.md", content="# 结果", runtime=_runtime())
 
     sandbox.write_file.assert_awaited_once_with("report.md", "# 结果", directory=WorkspaceDirectory.OUTPUTS)
     assert "/conversations/c1/outputs/report.md" in result
@@ -92,7 +89,7 @@ async def test_save_output_file_wraps_image_extension_in_image_tag() -> None:
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), patch(
         "src.agent_core.tools.sandbox_tool.get_settings", return_value=settings
     ):
-        result = await save_output_file.coroutine(path="chart.png", content="fake-bytes", config=_config())
+        result = await save_output_file.coroutine(path="chart.png", content="fake-bytes", runtime=_runtime())
 
     assert "<image>" in result and "</image>" in result
     assert "/conversations/c1/outputs/chart.png" in result
@@ -108,7 +105,7 @@ async def test_save_output_file_non_image_extension_keeps_plain_link() -> None:
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), patch(
         "src.agent_core.tools.sandbox_tool.get_settings", return_value=settings
     ):
-        result = await save_output_file.coroutine(path="report.pdf", content="fake-bytes", config=_config())
+        result = await save_output_file.coroutine(path="report.pdf", content="fake-bytes", runtime=_runtime())
 
     assert "<image>" not in result
     assert "下载链接" in result
@@ -124,21 +121,21 @@ async def test_save_output_file_prefixes_public_base_url_when_configured() -> No
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), patch(
         "src.agent_core.tools.sandbox_tool.get_settings", return_value=settings
     ):
-        result = await save_output_file.coroutine(path="report.md", content="# 结果", config=_config())
+        result = await save_output_file.coroutine(path="report.md", content="# 结果", runtime=_runtime())
 
     assert "http://localhost:8080/conversations/c1/outputs/report.md" in result
 
 
 async def test_run_python_rejects_when_both_code_and_file_path_given() -> None:
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider") as get_provider:
-        result = await run_python.coroutine(code="print(1)", file_path="a.py", config=_config())
+        result = await run_python.coroutine(code="print(1)", file_path="a.py", runtime=_runtime())
 
     get_provider.assert_not_called()
     assert "只能提供一个" in result
 
 
 async def test_run_python_rejects_when_neither_code_nor_file_path_given() -> None:
-    result = await run_python.coroutine(config=_config())
+    result = await run_python.coroutine(runtime=_runtime())
     assert "只能提供一个" in result
 
 
@@ -151,7 +148,7 @@ async def test_run_python_with_code_uses_dash_c_command() -> None:
 
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), \
          patch("src.agent_core.tools.sandbox_tool.sys.executable", "python3"):
-        result = await run_python.coroutine(code="print(1)", config=_config())
+        result = await run_python.coroutine(code="print(1)", runtime=_runtime())
 
     sandbox.execute_command.assert_awaited_once_with(["python3", "-c", "print(1)"], timeout=None)
     assert "status=success" in result
@@ -167,7 +164,7 @@ async def test_run_python_with_file_path_runs_interpreter_on_file() -> None:
 
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider), \
          patch("src.agent_core.tools.sandbox_tool.sys.executable", "python3"):
-        result = await run_python.coroutine(file_path="quicksort.py", config=_config())
+        result = await run_python.coroutine(file_path="quicksort.py", runtime=_runtime())
 
     sandbox.execute_command.assert_awaited_once_with(["python3", "quicksort.py"], timeout=None)
     assert "status=failed" in result
@@ -176,7 +173,7 @@ async def test_run_python_with_file_path_runs_interpreter_on_file() -> None:
 
 async def test_run_command_rejects_empty_command() -> None:
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider") as get_provider:
-        result = await run_command.coroutine(command=[], config=_config())
+        result = await run_command.coroutine(command=[], runtime=_runtime())
 
     get_provider.assert_not_called()
     assert "不能为空" in result
@@ -192,7 +189,7 @@ async def test_run_command_reports_truncated_output() -> None:
     provider = _fake_provider(sandbox)
 
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
-        result = await run_command.coroutine(command=["echo", "hi"], config=_config())
+        result = await run_command.coroutine(command=["echo", "hi"], runtime=_runtime())
 
     assert "已截断" in result
 
@@ -207,7 +204,7 @@ async def test_short_stdout_stays_inline_without_disk_write() -> None:
     provider = _fake_provider(sandbox)
 
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
-        result = await run_command.coroutine(command=["echo", "hi"], config=_config())
+        result = await run_command.coroutine(command=["echo", "hi"], runtime=_runtime())
 
     sandbox.write_file.assert_not_called()
     assert "line0" in result and "line9" in result
@@ -224,7 +221,7 @@ async def test_long_stdout_gets_offloaded_to_disk_with_head_tail_preview() -> No
     provider = _fake_provider(sandbox)
 
     with patch("src.agent_core.tools.sandbox_tool.get_sandbox_provider", return_value=provider):
-        result = await run_command.coroutine(command=["echo", "hi"], config=_config())
+        result = await run_command.coroutine(command=["echo", "hi"], runtime=_runtime())
 
     sandbox.write_file.assert_awaited_once()
     written_path, written_content = sandbox.write_file.await_args.args

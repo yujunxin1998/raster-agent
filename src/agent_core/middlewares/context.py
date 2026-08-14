@@ -1,14 +1,19 @@
 """中间件流水线共用的运行时上下文类型。
 
-`langchain.agents.middleware.AgentMiddleware` 的各钩子通过 `runtime.context`
-（`langgraph.runtime.Runtime[ContextT]`）访问一次请求级别的静态依赖，这与
-现有工具（`skill_tool_factory.py`/`memory_tools.py`）built 在旧式
-`RunnableConfig.configurable` 之上是两条并行的通道——`create_agent` 在新
-框架下仍然会把 `context` 里的字段透传进 `config["configurable"]`，所以
-现有工具代码不需要因为中间件骨架的引入而改动。
+`langchain.agents.middleware.AgentMiddleware` 的各钩子、以及标注了
+`runtime: ToolRuntime[AgentRuntimeContext]` 参数的工具函数，都通过
+`runtime.context`（`langgraph.runtime.Runtime[ContextT]`）访问一次请求级别
+的静态依赖。这是唯一的业务上下文通道——`create_agent`/`StateGraph` 并不会把
+`context` dataclass 的字段展开透传进 `config["configurable"]`（查过
+`langgraph.pregel` 源码：`context` 整体作为一个不透明对象存进
+`config["configurable"]["__pregel_runtime"]`，不产生 `user_id` 这样的顶层
+key）。`config["configurable"]` 只保留 LangGraph 框架本身需要的键，目前
+唯一的例外是 `thread_id`——Checkpointer 硬性要求从这里读取，不能迁移进
+`context_schema`。
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -17,7 +22,9 @@ class AgentRuntimeContext:
     """一次 Agent 运行的静态上下文（对应 DeerFlow 的 thread 级依赖）。
 
     Attributes:
-        conversation_id: 会话 ID，同时是虚拟工作区/沙箱的隔离粒度。
+        conversation_id: 会话 ID，同时是虚拟工作区/沙箱的隔离粒度，也是
+            Checkpointer 的 `thread_id`（两者取值相同，只是后者因为框架
+            限制必须另外放进 `config["configurable"]["thread_id"]`）。
         user_id: 归属用户 ID，可为空（内部调用/测试场景）。
         thinking: 是否处于深度思考模式，供 Guardrail 等策略引用。
         datasource_id: 本次请求绑定的数据源 ID，供
@@ -32,6 +39,11 @@ class AgentRuntimeContext:
             把 Profile/Facts 只查一次；不写入 LangGraph Checkpoint（dataclass
             字段不参与状态持久化），新的用户消息到来时这个 context 实例本身
             就会被重新构造，天然失效，不需要显式清空。
+        secrets: 本次请求携带的密钥值，键名对应 SKILL.md `required_secrets`
+            里声明的名字，供 `SkillToolFactory._resolve_secret_env` 做"三重
+            交集"校验后按需注入子进程环境变量，绝不进入对话消息/日志/
+            checkpoint。目前调用方（`chat_pipeline.py`）尚未接入真实密钥
+            来源，恒为空字典。
     """
 
     conversation_id: str
@@ -40,3 +52,4 @@ class AgentRuntimeContext:
     datasource_id: str | None = None
     registry_revision: int | None = None
     memory_cache: dict = field(default_factory=dict)
+    secrets: Mapping[str, str] = field(default_factory=dict)

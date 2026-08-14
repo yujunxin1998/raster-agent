@@ -9,12 +9,13 @@
 """
 from __future__ import annotations
 
-from langchain_core.runnables import RunnableConfig
+from langgraph.prebuilt import ToolRuntime
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
 from src.agent_core.agents.sub_agent_factory import run_subagent
 from src.agent_core.agents.subagent_profiles import get_profile, list_subagent_types
+from src.agent_core.middlewares.context import AgentRuntimeContext
 
 
 class _TaskInput(BaseModel):
@@ -35,7 +36,7 @@ def _build_task_tool_description() -> str:
 def build_task_tool() -> BaseTool:
     """构建 `task` 工具：按 `subagent_type` 查表派发给对应的 subagent profile。"""
 
-    async def _invoke(subagent_type: str, task: str, config: RunnableConfig) -> str:
+    async def _invoke(subagent_type: str, task: str, runtime: ToolRuntime[AgentRuntimeContext]) -> str:
         profile = get_profile(subagent_type)
         if profile is None:
             return f"未知的 subagent_type: {subagent_type!r}，可用类型：{', '.join(list_subagent_types())}"
@@ -44,7 +45,7 @@ def build_task_tool() -> BaseTool:
             system_prompt=profile.system_prompt_factory(),
             tools=profile.tools_factory(),
             task=task,
-            config=config,
+            context=runtime.context,
         )
 
     return StructuredTool(

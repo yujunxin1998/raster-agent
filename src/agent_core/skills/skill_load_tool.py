@@ -14,11 +14,12 @@ Lead Agent 场景下，`agent_core.agents.skill_middleware.SkillMiddleware` 会�
 """
 from __future__ import annotations
 
-from langchain_core.runnables import RunnableConfig
+from langgraph.prebuilt import ToolRuntime
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from src.agent_core.guardrail.guardrail_provider import GuardrailContext, GuardrailProvider
+from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.skills.skill_activation_service import SkillActivationService
 from src.common.exceptions import SkillDefinitionInvalidError, SkillNotFoundError
 
@@ -50,10 +51,9 @@ def create_load_skill_tool(
         绑定好范围的 `StructuredTool` 实例。
     """
 
-    async def _invoke(skill_name: str, config: RunnableConfig) -> str:
-        configurable = config.get("configurable", {}) if config else {}
-        user_id = configurable.get("user_id")
-        conversation_id = configurable.get("thread_id")
+    async def _invoke(skill_name: str, runtime: ToolRuntime[AgentRuntimeContext]) -> str:
+        user_id = runtime.context.user_id
+        conversation_id = runtime.context.conversation_id
 
         decision = await guardrail_provider.check(
             user_id=user_id,

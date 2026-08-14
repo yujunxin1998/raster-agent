@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.agent_core.guardrail.guardrail_provider import GuardrailDecision
+from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.skills.skill_loader import SkillLoader
 from src.agent_core.tools.registry.providers import SkillToolProvider
 
@@ -103,7 +105,8 @@ async def test_load_skill_definition_build_tool_produces_working_tool(tmp_path: 
     tool = load_skill_definition.build_tool()
 
     result = await tool.coroutine(
-        skill_name="data-analysis", config={"configurable": {"thread_id": "c1", "user_id": "u1"}}
+        skill_name="data-analysis",
+        runtime=SimpleNamespace(context=AgentRuntimeContext(conversation_id="c1", user_id="u1")),
     )
 
     assert "正文" in result

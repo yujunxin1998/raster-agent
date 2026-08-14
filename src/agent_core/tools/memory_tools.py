@@ -14,10 +14,11 @@ is_sensitive_content`）仍然保留，跟 `MemoryApplyEngine`/管理 API 走同
 """
 from __future__ import annotations
 
-from langchain_core.runnables import RunnableConfig
+from langgraph.prebuilt import ToolRuntime
 from langchain_core.tools import tool
 
 from src.agent_core.memory import get_memory_manager
+from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.memory.elasticsearch_memory_store import get_elasticsearch_memory_store
 from src.common.constants import MemoryAuditAction, MemorySource
 from src.config.settings import get_settings
@@ -31,7 +32,7 @@ _MEMORY_FEATURE_DISABLED_MESSAGE = "记忆功能当前已关闭。"
 @tool
 async def save_memory(
     content: str,
-    config: RunnableConfig,
+    runtime: ToolRuntime[AgentRuntimeContext],
     memory_type: str = "context",
     importance: int = 5,
 ) -> str:
@@ -45,9 +46,8 @@ async def save_memory(
     if not settings.MEMORY_ENABLED or not settings.MEMORY_TOOL_ENABLED:
         return _MEMORY_FEATURE_DISABLED_MESSAGE
 
-    configurable = config.get("configurable", {})
-    user_id = resolve_user_id(configurable.get("user_id"))
-    conversation_id = configurable.get("thread_id")
+    user_id = resolve_user_id(runtime.context.user_id)
+    conversation_id = runtime.context.conversation_id
 
     manager = get_memory_manager()
     if manager.is_sensitive_content(content):
@@ -70,7 +70,7 @@ async def save_memory(
 
 
 @tool
-async def recall_memory(query: str, config: RunnableConfig) -> str:
+async def recall_memory(query: str, runtime: ToolRuntime[AgentRuntimeContext]) -> str:
     """从长期记忆库检索与当前话题相关的历史记忆。
 
     当需要回忆用户过去提到的信息时调用。
@@ -79,9 +79,8 @@ async def recall_memory(query: str, config: RunnableConfig) -> str:
     if not settings.MEMORY_ENABLED or not settings.MEMORY_TOOL_ENABLED:
         return _MEMORY_FEATURE_DISABLED_MESSAGE
 
-    configurable = config.get("configurable", {})
-    user_id = resolve_user_id(configurable.get("user_id"))
-    conversation_id = configurable.get("thread_id")
+    user_id = resolve_user_id(runtime.context.user_id)
+    conversation_id = runtime.context.conversation_id
 
     memories = await get_elasticsearch_memory_store().search(query=query, user_id=user_id)
     memories = [memory for memory in memories if memory.get("score", 1.0) >= settings.MEMORY_MIN_RECALL_SCORE]

@@ -10,17 +10,21 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Any, Optional
 
-from langchain_core.runnables import RunnableConfig
+from langgraph.prebuilt import ToolRuntime
 from langchain_core.tools import StructuredTool
 from loguru import logger
 from pydantic import BaseModel, create_model
 
 from src.agent_core.guardrail.guardrail_provider import GuardrailContext, GuardrailProvider
+from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.sandbox.sandbox_provider import SandboxProvider
 from src.agent_core.skills.skill_content_reader import SkillContentReader
 from src.agent_core.skills.skill_definition import SkillDefinition
+
+_MISSING = object()
 
 # SKILL.md frontmatter parameter type -> Python type 映射
 _TYPE_MAP: dict[str, type] = {
@@ -113,10 +117,10 @@ class SkillToolFactory:
         args_schema = self._schema_builder.build(skill)
         reader = SkillContentReader(skill)
 
-        async def _invoke(config: RunnableConfig, **kwargs: Any) -> str:
-            configurable = config.get("configurable", {}) if config else {}
-            user_id = configurable.get("user_id")
-            conversation_id = configurable.get("thread_id")
+        async def _invoke(runtime: ToolRuntime[AgentRuntimeContext], **kwargs: Any) -> str:
+            context = runtime.context
+            user_id = context.user_id
+            conversation_id = context.conversation_id
 
             decision = await self._guardrail_provider.check(
                 user_id=user_id,
@@ -129,8 +133,9 @@ class SkillToolFactory:
 
             params = dict(kwargs)
             for key in skill.runtime_context_keys:
-                if key in configurable:
-                    params[key] = configurable[key]
+                value = getattr(context, key, _MISSING)
+                if value is not _MISSING:
+                    params[key] = value
 
             if not skill.has_script():
                 return await reader.assemble(params, sandbox=None, script_timeout_seconds=self._skill_script_timeout_seconds)
@@ -141,7 +146,7 @@ class SkillToolFactory:
                 )
                 return _SANDBOX_UNAVAILABLE_REASON_TEMPLATE.format(tool_name=skill.tool_name)
 
-            secret_env = self._resolve_secret_env(skill, configurable)
+            secret_env = self._resolve_secret_env(skill, context.secrets)
 
             sandbox = await self._sandbox_provider.acquire(conversation_id, user_id)
             try:
@@ -161,18 +166,18 @@ class SkillToolFactory:
             coroutine=_invoke,
         )
 
-    def _resolve_secret_env(self, skill: SkillDefinition, configurable: dict) -> dict[str, str]:
+    def _resolve_secret_env(self, skill: SkillDefinition, secrets: Mapping[str, str]) -> dict[str, str]:
         """按"三重交集"规则算出本次调用允许注入的密钥环境变量（设计文档 5.4 节）。
 
         三个条件缺一不可：技能已被 Guardrail 放行执行（调用到这里之前已校验）×
-        调用方本次请求通过 `configurable["secrets"]` 提供了值 × SKILL.md
+        调用方本次请求通过 `AgentRuntimeContext.secrets` 提供了值 × SKILL.md
         frontmatter 用 `required_secrets` 声明了这个名字。任何一环缺失都只是
         "这次拿不到该密钥"，不报错、不影响技能其余部分执行。
 
         Args:
             skill: 目标技能定义。
-            configurable: 本次调用的 `RunnableConfig.configurable`，密钥通过其中
-                的 `secrets` 字段传入，绝不进入对话消息/日志/checkpoint。
+            secrets: 本次调用的 `AgentRuntimeContext.secrets`，绝不进入对话
+                消息/日志/checkpoint。
 
         Returns:
             允许注入子进程的密钥环境变量字典，可能为空。
@@ -180,13 +185,12 @@ class SkillToolFactory:
         if not skill.required_secrets:
             return {}
 
-        requested_secrets = configurable.get("secrets") or {}
-        if not isinstance(requested_secrets, dict):
+        if not isinstance(secrets, Mapping):
             return {}
 
         declared_names = {secret.name for secret in skill.required_secrets}
         return {
             name: value
-            for name, value in requested_secrets.items()
+            for name, value in secrets.items()
             if name in declared_names
         }

@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.agent_core.guardrail.guardrail_provider import GuardrailDecision
+from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.skills.skill_activation_service import SkillActivationService
 from src.agent_core.skills.skill_load_tool import create_load_skill_tool
 from src.agent_core.skills.skill_loader import SkillLoader
@@ -34,8 +36,8 @@ def _write_workflow_skill(tmp_path: Path, *, name: str = "demo-workflow") -> Pat
     return public_root
 
 
-def _config() -> dict:
-    return {"configurable": {"thread_id": "c1", "user_id": "u1"}}
+def _runtime() -> SimpleNamespace:
+    return SimpleNamespace(context=AgentRuntimeContext(conversation_id="c1", user_id="u1"))
 
 
 async def test_allowed_skill_returns_activated_instructions(tmp_path: Path) -> None:
@@ -46,7 +48,7 @@ async def test_allowed_skill_returns_activated_instructions(tmp_path: Path) -> N
         SkillActivationService(registry), provider, allowed_categories=frozenset({"general"})
     )
 
-    result = await tool.coroutine(skill_name="demo-workflow", config=_config())
+    result = await tool.coroutine(skill_name="demo-workflow", runtime=_runtime())
 
     assert "正文指令" in result
     # 按具体技能名校验，不是恒定的 "load_skill"（保留可单独禁用某个技能的粒度）。
@@ -62,7 +64,7 @@ async def test_denied_skill_returns_reason_without_loading(tmp_path: Path) -> No
         SkillActivationService(registry), provider, allowed_categories=frozenset({"general"})
     )
 
-    result = await tool.coroutine(skill_name="demo-workflow", config=_config())
+    result = await tool.coroutine(skill_name="demo-workflow", runtime=_runtime())
 
     assert result == "该技能已被禁用"
 
@@ -75,6 +77,6 @@ async def test_unknown_skill_returns_error_text_not_exception(tmp_path: Path) ->
         SkillActivationService(registry), provider, allowed_categories=frozenset({"general"})
     )
 
-    result = await tool.coroutine(skill_name="does-not-exist", config=_config())
+    result = await tool.coroutine(skill_name="does-not-exist", runtime=_runtime())
 
     assert "未找到" in result

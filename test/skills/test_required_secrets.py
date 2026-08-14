@@ -76,9 +76,9 @@ def _factory() -> SkillToolFactory:
 def test_resolve_secret_env_three_way_intersection() -> None:
     """只有"frontmatter 声明 × 调用方提供"都满足的密钥才会被注入。"""
     skill = _build_skill([RequiredSecret(name="A"), RequiredSecret(name="B")])
-    configurable = {"secrets": {"A": "value-a", "C": "value-c"}}  # B 未提供，C 未声明
+    secrets = {"A": "value-a", "C": "value-c"}  # B 未提供，C 未声明
 
-    result = _factory()._resolve_secret_env(skill, configurable)
+    result = _factory()._resolve_secret_env(skill, secrets)
 
     assert result == {"A": "value-a"}
 
@@ -86,9 +86,9 @@ def test_resolve_secret_env_three_way_intersection() -> None:
 def test_resolve_secret_env_no_required_secrets_declared() -> None:
     """技能没有声明 required_secrets 时，即使调用方提供了 secrets 也不注入任何内容。"""
     skill = _build_skill([])
-    configurable = {"secrets": {"A": "value-a"}}
+    secrets = {"A": "value-a"}
 
-    result = _factory()._resolve_secret_env(skill, configurable)
+    result = _factory()._resolve_secret_env(skill, secrets)
 
     assert result == {}
 
@@ -97,6 +97,6 @@ def test_resolve_secret_env_caller_did_not_provide_secrets() -> None:
     """调用方本次请求没有传 secrets 字段时，不报错，返回空字典。"""
     skill = _build_skill([RequiredSecret(name="A")])
 
-    result = _factory()._resolve_secret_env(skill, configurable={})
+    result = _factory()._resolve_secret_env(skill, secrets={})
 
     assert result == {}

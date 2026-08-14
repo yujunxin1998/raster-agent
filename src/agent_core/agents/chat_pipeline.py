@@ -332,12 +332,12 @@ async def run_chat_turn(
         conversation_id=conversation_id,
     )
     config = {
-        "configurable": {"thread_id": conversation_id, "secrets": {}, "datasource_id": datasource_id},
+        "configurable": {"thread_id": conversation_id},
         "recursion_limit": resolve_recursion_limit(thinking),
     }
     context = AgentRuntimeContext(
         conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
-        registry_revision=registry_revision,
+        registry_revision=registry_revision, secrets={},
     )
 
     message_with_attachments = await _build_message_with_attachments(conversation_id, user_id, message, file_ids)
@@ -393,12 +393,12 @@ async def run_regenerate_turn(
         conversation_id=conversation_id,
     )
     config = {
-        "configurable": {"thread_id": conversation_id, "secrets": {}, "datasource_id": datasource_id},
+        "configurable": {"thread_id": conversation_id},
         "recursion_limit": resolve_recursion_limit(thinking),
     }
     context = AgentRuntimeContext(
         conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
-        registry_revision=registry_revision,
+        registry_revision=registry_revision, secrets={},
     )
 
     state = await agent.aget_state(config)
