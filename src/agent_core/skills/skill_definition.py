@@ -8,11 +8,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 from src.common.constants import SkillCategory
 
 _SCRIPT_ENTRY_CANDIDATES = ("main.py", "main.js")
+
+
+class SkillKind(str, Enum):
+    """技能形态：决定它被投影成"独立参数化工具"还是"load_skill 可加载的工作流"。
+
+    从 `SkillDefinition.parameters` 是否非空派生（见 `SkillDefinition.kind`），
+    不是 frontmatter 里的独立字段——12 个现有 SKILL.md 不需要任何改动就能被
+    正确分类（对应 `docs/Skill注入与Load-Skill重构设计.md` 第三节）。
+    """
+
+    TOOL = "tool"  # 有 parameters，本质是业务工具（如 query_database），走 SkillToolFactory
+    WORKFLOW = "workflow"  # 无 parameters，纯指令，经 load_skill 通用工具加载
 
 
 @dataclass(frozen=True)
@@ -94,6 +107,11 @@ class SkillDefinition:
     def source(self) -> str:
         """技能来源：core（内置）/ public（社区技能），取自 skill_dir 的上一级目录名。"""
         return self.skill_dir.parent.name
+
+    @property
+    def kind(self) -> SkillKind:
+        """技能形态，从 `parameters` 是否非空派生，见 `SkillKind` 文档。"""
+        return SkillKind.TOOL if self.parameters else SkillKind.WORKFLOW
 
     def __repr__(self) -> str:  # noqa: D105
         return f"SkillDefinition(tool_name={self.tool_name!r}, category={self.category!r})"

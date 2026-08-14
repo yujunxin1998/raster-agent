@@ -51,6 +51,14 @@ class SkillManager:
             skill_script_timeout_seconds=skill_script_timeout_seconds,
         )
 
+    @property
+    def tool_factory(self) -> SkillToolFactory:
+        """暴露内部 SkillToolFactory，供 `agent_core.tools.registry.providers.SkillToolProvider`
+        复用（惰性构建 `ToolDefinition.build_tool`），避免注册中心重复装配一份
+        权限/沙箱配置完全相同的 SkillToolFactory。
+        """
+        return self._factory
+
     def get_tools(self, category: str) -> list[StructuredTool]:
         """返回某个分类下全部技能对应的 StructuredTool。
 

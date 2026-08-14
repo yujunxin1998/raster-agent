@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from src.agent_core.skills.skill_definition import SkillDefinition
-from src.common.exceptions import SkillNotFoundError
+from src.common.exceptions import DuplicateSkillError, SkillNotFoundError
 
 
 class SkillRegistry:
@@ -22,11 +22,22 @@ class SkillRegistry:
         self._store: dict[str, SkillDefinition] = {}
 
     def register(self, skill: SkillDefinition) -> None:
-        """注册一个技能，同名 tool_name 会被覆盖（后加载的生效）。
+        """注册一个技能，同名 `tool_name` 显式拒绝，不静默覆盖。
+
+        原实现"后加载的生效"依赖 `SkillLoader` 目录扫描的 `sorted()` 顺序，
+        本质是未定义行为伪装成确定性——`SkillLoader.load()` 单个技能解析
+        失败已经是"记 error 日志 + 跳过"的容错策略，这里抛出的
+        `DuplicateSkillError` 会被同一个 `except Exception` 捕获，效果是
+        "两个同名技能都不注册、只留错误日志"，不会导致启动失败。
 
         Args:
             skill: 待注册的技能定义。
+
+        Raises:
+            DuplicateSkillError: 已存在同名 `tool_name` 的技能。
         """
+        if skill.tool_name in self._store:
+            raise DuplicateSkillError(f"技能 tool_name 冲突: {skill.tool_name}")
         self._store[skill.tool_name] = skill
 
     def get(self, tool_name: str) -> SkillDefinition:

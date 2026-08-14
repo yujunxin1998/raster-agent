@@ -26,10 +26,14 @@ from loguru import logger
 
 from src.agent_core.guardrail.guardrail_provider import GuardrailProvider
 from src.agent_core.sandbox.sandbox_provider import SandboxProvider
-from src.agent_core.skills.skill_definition import SkillDefinition
+from src.agent_core.skills.skill_activation_service import SkillActivationService
+from src.agent_core.skills.skill_catalog import build_skill_catalog
+from src.agent_core.skills.skill_definition import SkillDefinition, SkillKind
 from src.agent_core.skills.skill_file_tree_reader import SkillFileTreeReader
+from src.agent_core.skills.skill_load_tool import create_load_skill_tool
 from src.agent_core.skills.skill_loader import SkillLoader, resolve_skill_dirs
 from src.agent_core.skills.skill_manager import SkillManager
+from src.agent_core.skills.skill_path_rewriter import SkillPathRewriter
 from src.agent_core.skills.skill_registry import SkillRegistry
 from src.agent_core.skills.skill_tool_factory import SkillParameterSchemaBuilder, SkillToolFactory
 from src.common.constants import SkillCategory
@@ -91,10 +95,15 @@ __all__ = [
     "get_skill_manager",
     "SkillManager",
     "SkillDefinition",
+    "SkillKind",
     "SkillRegistry",
     "SkillLoader",
     "SkillToolFactory",
     "SkillParameterSchemaBuilder",
     "SkillFileTreeReader",
+    "SkillActivationService",
+    "SkillPathRewriter",
+    "create_load_skill_tool",
+    "build_skill_catalog",
     "resolve_skill_dirs",
 ]

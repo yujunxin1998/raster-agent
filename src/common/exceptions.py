@@ -59,6 +59,12 @@ class SkillDefinitionInvalidError(SkillError):
     error_code = "SKILL_DEFINITION_INVALID"
 
 
+class DuplicateSkillError(SkillError):
+    """两个技能声明了相同的 tool_name，注册时显式拒绝而不是静默覆盖。"""
+
+    error_code = "SKILL_DUPLICATE_NAME"
+
+
 # ── Memory 机制 ──────────────────────────────────────────────────
 class MemoryStoreError(AgentCoreError):
     """长期记忆存储相关异常的基类。"""
