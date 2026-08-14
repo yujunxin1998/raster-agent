@@ -40,6 +40,13 @@ dependencies = [
     "python-docx==1.1.2",
     "openpyxl==3.1.5",
     "pypdf==5.1.0",
+    # MCPToolProvider（工具注册中心，新增）：mcp 官方 SDK + LangChain 适配层，
+    # 直接产出可执行的 BaseTool，不用像前端工具那样手写 JSON Schema 转换。
+    "mcp>=1.24.0,<2.0.0",
+    "langchain-mcp-adapters==0.3.2",
+    # Skill 热重载（工具注册中心，新增）文件监听。此前只是 uvicorn[standard]
+    # 的间接依赖（服务于 --reload），业务代码现在也直接 import，因此显式声明。
+    "watchfiles==1.2.0",
 ]
 
 [project.optional-dependencies]

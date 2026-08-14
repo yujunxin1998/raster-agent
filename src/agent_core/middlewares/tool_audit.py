@@ -16,6 +16,23 @@ from langgraph.types import Command
 from loguru import logger
 
 from src.agent_core.middlewares.context import AgentRuntimeContext
+from src.agent_core.tools.registry.tool_registry import get_tool_registry
+
+
+def _resolve_source_type(tool_name: str) -> str | None:
+    """按当前快照查该工具的来源类型，仅用于日志展示（工具注册中心设计文档
+    4.4 节："排障时要注意失败原因可能来自远程 MCP Server，`ToolAuditMiddleware`
+    记录时应该把 source_type=mcp 带上，方便一眼区分"）。
+
+    ToolRegistry 未初始化（如中间件单元测试直接构造实例，不经过完整
+    `main.py` lifespan）时静默返回 None，不影响审计日志本身的记录。
+    """
+    try:
+        snapshot = get_tool_registry().current_snapshot()
+    except RuntimeError:
+        return None
+    definition = snapshot.by_model_name.get(tool_name)
+    return definition.source_type if definition else None
 
 
 class ToolAuditMiddleware(AgentMiddleware[object, AgentRuntimeContext]):
@@ -33,10 +50,13 @@ class ToolAuditMiddleware(AgentMiddleware[object, AgentRuntimeContext]):
         """
         context = request.runtime.context
         tool_name = request.tool_call["name"]
+        source_type = _resolve_source_type(tool_name)
+        registry_revision = context.registry_revision if context else None
         started_at = time.monotonic()
 
         logger.info(
-            f"[ToolAudit] 开始 tool={tool_name} "
+            f"[ToolAudit] 开始 tool={tool_name} source_type={source_type} "
+            f"registry_revision={registry_revision} "
             f"user_id={context.user_id if context else None} "
             f"conversation_id={context.conversation_id if context else None}"
         )
@@ -44,10 +64,16 @@ class ToolAuditMiddleware(AgentMiddleware[object, AgentRuntimeContext]):
             result = await handler(request)
         except Exception as exc:
             duration_ms = int((time.monotonic() - started_at) * 1000)
-            logger.info(f"[ToolAudit] 异常 tool={tool_name} duration_ms={duration_ms} error={exc}")
+            logger.info(
+                f"[ToolAudit] 异常 tool={tool_name} source_type={source_type} "
+                f"duration_ms={duration_ms} error={exc}"
+            )
             raise
 
         duration_ms = int((time.monotonic() - started_at) * 1000)
         status = getattr(result, "status", "success") if isinstance(result, ToolMessage) else "success"
-        logger.info(f"[ToolAudit] 结束 tool={tool_name} duration_ms={duration_ms} status={status}")
+        logger.info(
+            f"[ToolAudit] 结束 tool={tool_name} source_type={source_type} "
+            f"duration_ms={duration_ms} status={status}"
+        )
         return result

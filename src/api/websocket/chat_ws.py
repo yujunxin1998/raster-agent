@@ -19,7 +19,7 @@ from loguru import logger
 from src.agent_core.agents.chat_pipeline import ChatTurnResult, run_chat_turn, run_regenerate_turn
 from src.agent_core.eval.emitter import EvalEventEmitter
 from src.agent_core.eval.http_middleware import emit_ws_chat_record
-from src.agent_core.tools.custom_tool_converter import CustomToolConverter
+from src.agent_core.tools.registry import discover_frontend_tools
 from src.api.websocket.connection_manager import manager
 from src.storage.conversation_store import get_conversation_store
 from src.storage.message_store import get_message_store
@@ -100,12 +100,13 @@ async def websocket_chat(websocket: WebSocket) -> None:
             conversation_id = payload.get("conversation_id") or content.get("conversation_id") or generate_uuid()
             user_id = payload.get("user_id") or content.get("user_id") or user_id
 
-            extra_tools = None
-            if tool_list:
-                extra_tools = CustomToolConverter.merge_tools(
-                    original_tools=[], tool_list=tool_list, manager=manager,
-                    client_id=client_id, conversation_id=conversation_id,
-                )
+            # request 级前端工具定义，与 ToolRegistry 的 application 级快照
+            # 合并、按来源优先级消解命名冲突，见 `resolve_tools()`（工具注册
+            # 中心设计文档 4.2/4.3 节）——不再在这里预先跟"服务端已有工具"
+            # 做同名覆盖判断，避免前端工具静默覆盖内置/Skill 工具。
+            extra_tools = discover_frontend_tools(
+                tool_list=tool_list, manager=manager, client_id=client_id, conversation_id=conversation_id,
+            )
 
             asyncio.create_task(
                 _handle_chat(
