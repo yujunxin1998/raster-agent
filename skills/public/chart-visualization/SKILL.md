@@ -56,7 +56,7 @@ Invoke the `scripts/generate.js` script with a JSON payload.
 
 **Execution Command:**
 ```bash
-node ./scripts/generate.js '<payload_json>'
+node /mnt/skills/public/chart-visualization/scripts/generate.js '<payload_json>'
 ```
 
 ### 4. Result Return

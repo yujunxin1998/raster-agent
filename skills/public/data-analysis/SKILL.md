@@ -28,7 +28,7 @@ When a user uploads data files and requests analysis, identify:
 - **File location**: Path(s) to uploaded Excel/CSV files under `/mnt/user-data/uploads/`
 - **Analysis goal**: What insights the user wants (summary, filtering, aggregation, comparison, etc.)
 - **Output format**: How results should be presented (table, CSV export, JSON, etc.)
-- You don't need to check the folder under `/mnt/user-data`
+- You don't need to check the uploads folder yourself before running the script
 
 ### Step 2: Inspect File Structure
 
@@ -78,8 +78,15 @@ python /mnt/skills/public/data-analysis/scripts/analyze.py \
   --files /mnt/user-data/uploads/data.xlsx \
   --action query \
   --sql "SELECT * FROM Sheet1 WHERE amount > 1000" \
-  --output-file /mnt/user-data/outputs/filtered-results.csv
+  --output-file /mnt/user-data/workspace/filtered-results.csv
 ```
+
+> [!NOTE]
+> `--output-file` writes to the session's intermediate workspace, not a shareable
+> location. When the user needs a downloadable file, read the exported file's content
+> back and pass it to the `save_output_file` tool (`save_output_file(path, content)`) —
+> that tool returns the actual downloadable link. Do not try to construct a download
+> URL yourself.
 
 Supported output formats (auto-detected from extension):
 - `.csv` — Comma-separated values
@@ -195,7 +202,7 @@ python /mnt/skills/public/data-analysis/scripts/analyze.py \
   --files /mnt/user-data/uploads/sales_2024.xlsx \
   --action query \
   --sql "SELECT DATE_TRUNC('month', order_date) as month, SUM(quantity * unit_price) as revenue FROM Orders GROUP BY month ORDER BY month" \
-  --output-file /mnt/user-data/outputs/monthly-trends.csv
+  --output-file /mnt/user-data/workspace/monthly-trends.csv
 ```
 
 ### Step 4: Statistical summary
@@ -225,7 +232,8 @@ python /mnt/skills/public/data-analysis/scripts/analyze.py \
 After analysis:
 
 - Present query results directly in conversation as formatted tables
-- For large results, export to file and share via `present_files` tool
+- For large results, export to file (workspace) then read it back and share via the
+  `save_output_file` tool — that returns the actual downloadable link
 - Always explain findings in plain language with key takeaways
 - Suggest follow-up analyses when patterns are interesting
 - Offer to export results if the user wants to keep them

@@ -27,7 +27,7 @@ When a user requests image generation, identify:
 - Style preferences: Art style, mood, color palette
 - Technical specs: Aspect ratio, composition, lighting
 - Reference images: Any images to guide generation
-- You don't need to check the folder under `/mnt/user-data`
+- You don't need to check the uploads folder yourself before running the script
 
 ### Step 2: Create Structured Prompt
 
