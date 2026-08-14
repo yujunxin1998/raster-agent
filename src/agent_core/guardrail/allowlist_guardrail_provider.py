@@ -25,6 +25,7 @@ from src.storage.tool_permission_store import ToolPermissionStore
 
 _SKILL_DISABLED_REASON_TEMPLATE = "技能 [{tool_name}] 已被用户在设置中关闭，本次未执行。"
 _TOOL_DENIED_REASON_TEMPLATE = "工具 [{tool_name}] 未获授权执行，本次未执行。"
+_DEFAULT_PERMISSION_SCOPE = "default"
 
 
 class AllowlistGuardrailProvider(GuardrailProvider):
@@ -59,11 +60,17 @@ class AllowlistGuardrailProvider(GuardrailProvider):
             # 没有 user_id 即无法归属到具体用户，用户级开关无从谈起，默认放行。
             return GuardrailDecision.allow()
 
+        # scope 默认 "default"（兼容未传 extra["scope"] 的老调用点，如中间件
+        # 链上的 `GuardrailMiddleware`）；`resolve_tools()` 会按工具来源传入
+        # 更细粒度的取值（如 "frontend"、"mcp:{server_id}"），落到
+        # `ToolPermissionStore` 已预留的 scope 列（工具注册中心设计文档六节）。
+        scope = context.extra.get("scope") or _DEFAULT_PERMISSION_SCOPE
+
         try:
             if await self._skill_settings_store.is_disabled(user_id, tool_name):
                 return GuardrailDecision.deny(_SKILL_DISABLED_REASON_TEMPLATE.format(tool_name=tool_name))
 
-            if await self._tool_permission_store.is_denied(user_id, tool_name):
+            if await self._tool_permission_store.is_denied(user_id, tool_name, scope=scope):
                 return GuardrailDecision.deny(_TOOL_DENIED_REASON_TEMPLATE.format(tool_name=tool_name))
         except Exception as exc:
             # 权限存储不可用属于基础设施异常，不应该让"查权限"这件事本身

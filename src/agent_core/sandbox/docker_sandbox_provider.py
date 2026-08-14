@@ -32,6 +32,10 @@ class DockerSandboxProvider(SandboxProvider):
         default_timeout_seconds: int,
         max_output_bytes: int,
         max_memory_mb: int,
+        max_cpus: float = 1.0,
+        max_pids: int = 64,
+        tmpfs_size_mb: int = 64,
+        container_user: str = "65534:65534",
     ) -> None:
         """初始化 Docker 沙箱提供者。
 
@@ -51,6 +55,10 @@ class DockerSandboxProvider(SandboxProvider):
         self._default_timeout_seconds = default_timeout_seconds
         self._max_output_bytes = max_output_bytes
         self._max_memory_mb = max_memory_mb
+        self._max_cpus = max_cpus
+        self._max_pids = max_pids
+        self._tmpfs_size_mb = tmpfs_size_mb
+        self._container_user = container_user
 
     async def acquire(self, conversation_id: str, user_id: str | None = None) -> Sandbox:
         workspace = self._workspace_manager.get_or_create(conversation_id, user_id)
@@ -62,6 +70,10 @@ class DockerSandboxProvider(SandboxProvider):
             default_timeout_seconds=self._default_timeout_seconds,
             max_output_bytes=self._max_output_bytes,
             max_memory_mb=self._max_memory_mb,
+            max_cpus=self._max_cpus,
+            max_pids=self._max_pids,
+            tmpfs_size_mb=self._tmpfs_size_mb,
+            container_user=self._container_user,
         )
 
     async def release(self, sandbox: Sandbox) -> None:
@@ -77,6 +89,10 @@ async def init_docker_sandbox_provider(
     default_timeout_seconds: int,
     max_output_bytes: int,
     max_memory_mb: int,
+    max_cpus: float = 1.0,
+    max_pids: int = 64,
+    tmpfs_size_mb: int = 64,
+    container_user: str = "65534:65534",
 ) -> None:
     """应用启动时调用一次，构造 DockerSandboxProvider 并登记为全局单例。
 
@@ -90,9 +106,13 @@ async def init_docker_sandbox_provider(
 
     try:
         client = await asyncio.to_thread(docker.from_env)
+        await asyncio.to_thread(client.ping)
+        # 线上启动采用 fail-closed：镜像必须由部署流程提前拉取并锁定，应用不在
+        # 启动阶段隐式联网 pull，避免镜像漂移或仓库故障被掩盖。
+        await asyncio.to_thread(client.images.get, image)
     except Exception as exc:
         raise RuntimeError(
-            f"无法连接到 Docker daemon，请确认已启动 Docker（或改用 SANDBOX_PROVIDER=local）: {exc}"
+            f"Docker 沙箱初始化失败（daemon 或镜像不可用）；线上环境禁止降级到 Local: {exc}"
         ) from exc
 
     init_sandbox_provider(
@@ -104,6 +124,10 @@ async def init_docker_sandbox_provider(
             default_timeout_seconds=default_timeout_seconds,
             max_output_bytes=max_output_bytes,
             max_memory_mb=max_memory_mb,
+            max_cpus=max_cpus,
+            max_pids=max_pids,
+            tmpfs_size_mb=tmpfs_size_mb,
+            container_user=container_user,
         )
     )
     logger.info(f"[DockerSandboxProvider] 初始化完成 image={image}")

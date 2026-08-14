@@ -87,9 +87,13 @@ def _run_command_blocking(
         process.communicate()
         return CommandResult(status=SandboxCommandStatus.TIMEOUT, return_code=None)
 
-    truncated = len(stdout) > max_output_bytes
-    if truncated:
+    stdout_truncated = len(stdout) > max_output_bytes
+    stderr_truncated = len(stderr) > max_output_bytes
+    truncated = stdout_truncated or stderr_truncated
+    if stdout_truncated:
         stdout = stdout[:max_output_bytes]
+    if stderr_truncated:
+        stderr = stderr[:max_output_bytes]
 
     if truncated:
         status = SandboxCommandStatus.OUTPUT_TRUNCATED

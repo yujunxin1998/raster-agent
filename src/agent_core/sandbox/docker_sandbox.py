@@ -23,15 +23,17 @@ workspace 目录），所以这三个方法直接组合一个 `LocalSandbox` 实
 已知限制（显式记录而非假装解决）：
 - 默认镜像 `python:3.11-slim` 不含 Node.js，涉及 `.js` 脚本的技能在 Docker
   模式下会失败，需要通过 `DOCKER_SANDBOX_IMAGE` 换成自带 node 的镜像。
-- 暂不支持 `execute_command(stdin=...)` 管道输入（`SkillContentReader` 用它
-  传 JSON 参数给脚本）——docker-py 对已启动容器的 stdin attach 需要走底层
-  socket API，稳定性没有子进程 `communicate()` 有把握，本轮先返回明确的失败
-  说明而不是静默挂起，需要用到 stdin 的场景请使用 `SANDBOX_PROVIDER=local`。
+
+`execute_command(stdin=...)` 使用会话工作区内权限为 `0600` 的一次性文件桥接，
+通过固定 shell 包装器重定向给目标进程；命令参数只经 `"$@"` 传递，不参与 shell
+字符串拼接。容器结束或创建失败后都会删除该文件。
 """
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import uuid
 
 from loguru import logger
 
@@ -43,7 +45,6 @@ from src.common.constants import SandboxCommandStatus, WorkspaceDirectory
 
 _CONTAINER_WORKSPACE_PATH = "/workspace"
 _CONTAINER_PROJECT_ROOT_PATH = "/app"
-_STDIN_UNSUPPORTED_MESSAGE = "DockerSandbox 暂不支持 stdin 管道输入，请改用 SANDBOX_PROVIDER=local"
 
 # 容器有自己的文件系统布局，宿主机的这几个变量传进去反而会指错路径（例如
 # Windows 风格的 PATH/HOME 会覆盖镜像自带的 Linux 默认值），需要在清洗后的
@@ -64,6 +65,10 @@ class DockerSandbox(Sandbox):
         default_timeout_seconds: int,
         max_output_bytes: int,
         max_memory_mb: int,
+        max_cpus: float = 1.0,
+        max_pids: int = 64,
+        tmpfs_size_mb: int = 64,
+        container_user: str = "65534:65534",
     ) -> None:
         """初始化 Docker 沙箱。
 
@@ -83,6 +88,10 @@ class DockerSandbox(Sandbox):
         self._default_timeout_seconds = default_timeout_seconds
         self._max_output_bytes = max_output_bytes
         self._max_memory_mb = max_memory_mb
+        self._max_cpus = max_cpus
+        self._max_pids = max_pids
+        self._tmpfs_size_mb = tmpfs_size_mb
+        self._container_user = container_user
         self._local = LocalSandbox(
             workspace,
             default_timeout_seconds=default_timeout_seconds,
@@ -125,14 +134,6 @@ class DockerSandbox(Sandbox):
     ) -> CommandResult:
         if not command:
             raise ValueError("command 不能为空")
-        if stdin:
-            logger.warning(f"[DockerSandbox] 暂不支持 stdin 管道输入，已拒绝 command={command}")
-            return CommandResult(
-                status=SandboxCommandStatus.FAILED,
-                return_code=None,
-                stderr=_STDIN_UNSUPPORTED_MESSAGE.encode("utf-8"),
-            )
-
         resolved_timeout = timeout or self._default_timeout_seconds
         resolved_env = self._build_container_env(env)
         translated_command = self._translate_command(command)
@@ -141,6 +142,7 @@ class DockerSandbox(Sandbox):
             self._run_container_blocking,
             translated_command,
             env=resolved_env,
+            stdin_data=stdin,
             timeout=resolved_timeout,
         )
 
@@ -172,21 +174,64 @@ class DockerSandbox(Sandbox):
         return {name: value for name, value in cleaned.items() if name not in _HOST_ONLY_ENV_NAMES}
 
     def _run_container_blocking(
-        self, command: list[str], *, env: dict[str, str], timeout: float
+        self,
+        command: list[str],
+        *,
+        env: dict[str, str],
+        stdin_data: bytes | None,
+        timeout: float,
     ) -> CommandResult:
         """同步阻塞版本，跑在线程池里（docker-py 是同步 SDK）。"""
-        container = self._docker_client.containers.run(
-            self._image,
-            command,
-            working_dir=_CONTAINER_WORKSPACE_PATH,
-            volumes={
-                str(self._workspace.workspace_dir): {"bind": _CONTAINER_WORKSPACE_PATH, "mode": "rw"},
-                self._project_root: {"bind": _CONTAINER_PROJECT_ROOT_PATH, "mode": "ro"},
-            },
-            environment=env,
-            mem_limit=f"{self._max_memory_mb}m",
-            detach=True,
-        )
+        input_path = None
+        container_command = command
+        if stdin_data is not None:
+            input_name = f".sandbox-input-{uuid.uuid4().hex}.bin"
+            input_path = self._workspace.workspace_dir / input_name
+            input_path.write_bytes(stdin_data)
+            try:
+                os.chmod(input_path, 0o600)
+            except OSError:
+                pass
+            # 包装脚本是常量，用户参数通过 "$@" 原样传递，不参与 shell 拼接。
+            container_command = [
+                "sh",
+                "-c",
+                f'exec "$@" < "{_CONTAINER_WORKSPACE_PATH}/{input_name}"',
+                "sandbox-entry",
+                *command,
+            ]
+
+        try:
+            container = self._docker_client.containers.run(
+                self._image,
+                container_command,
+                working_dir=_CONTAINER_WORKSPACE_PATH,
+                volumes={
+                    str(self._workspace.workspace_dir): {
+                        "bind": _CONTAINER_WORKSPACE_PATH,
+                        "mode": "rw",
+                    },
+                    self._project_root: {"bind": _CONTAINER_PROJECT_ROOT_PATH, "mode": "ro"},
+                },
+                environment=env,
+                mem_limit=f"{self._max_memory_mb}m",
+                memswap_limit=f"{self._max_memory_mb}m",
+                nano_cpus=int(self._max_cpus * 1_000_000_000),
+                pids_limit=self._max_pids,
+                network_disabled=True,
+                read_only=True,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                user=self._container_user,
+                tmpfs={
+                    "/tmp": f"rw,noexec,nosuid,nodev,size={self._tmpfs_size_mb}m",
+                },
+                detach=True,
+            )
+        except Exception:
+            if input_path is not None:
+                input_path.unlink(missing_ok=True)
+            raise
         try:
             try:
                 exit_info = container.wait(timeout=timeout)
@@ -202,10 +247,16 @@ class DockerSandbox(Sandbox):
                 container.remove(force=True)
             except Exception as exc:
                 logger.warning(f"[DockerSandbox] 清理容器失败 container_id={container.id}: {exc}")
+            if input_path is not None:
+                input_path.unlink(missing_ok=True)
 
-        truncated = len(stdout) > self._max_output_bytes
-        if truncated:
+        stdout_truncated = len(stdout) > self._max_output_bytes
+        stderr_truncated = len(stderr) > self._max_output_bytes
+        truncated = stdout_truncated or stderr_truncated
+        if stdout_truncated:
             stdout = stdout[: self._max_output_bytes]
+        if stderr_truncated:
+            stderr = stderr[: self._max_output_bytes]
 
         if truncated:
             status = SandboxCommandStatus.OUTPUT_TRUNCATED

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from loguru import logger
@@ -14,6 +15,14 @@ from src.agent_core.workspace.thread_workspace import ThreadWorkspace
 from src.common.constants import WorkspaceDirectory
 
 _DEFAULT_USER_ID = "default"
+_SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_directory_id(value: str, field_name: str) -> str:
+    """校验会参与目录拼接的外部标识，拒绝路径控制字符和超长名称。"""
+    if not _SAFE_ID_PATTERN.fullmatch(value):
+        raise ValueError(f"{field_name} 只能包含字母、数字、下划线、连字符，长度为 1~64")
+    return value
 
 
 class ThreadWorkspaceManager:
@@ -51,11 +60,12 @@ class ThreadWorkspaceManager:
         Raises:
             ValueError: conversation_id 为空。
         """
-        if not conversation_id:
-            raise ValueError("conversation_id 不能为空")
-
-        resolved_user_id = user_id or _DEFAULT_USER_ID
-        root = self._workspace_root / "users" / resolved_user_id / "threads" / conversation_id
+        safe_conversation_id = _validate_directory_id(conversation_id, "conversation_id")
+        resolved_user_id = _validate_directory_id(user_id or _DEFAULT_USER_ID, "user_id")
+        users_root = (self._workspace_root / "users").resolve()
+        root = (users_root / resolved_user_id / "threads" / safe_conversation_id).resolve()
+        if root == users_root or users_root not in root.parents:
+            raise ValueError("会话工作区路径越出 WORKSPACE_ROOT")
         workspace = ThreadWorkspace(conversation_id=conversation_id, user_id=resolved_user_id, root=root)
         workspace.ensure_directories()
         return workspace

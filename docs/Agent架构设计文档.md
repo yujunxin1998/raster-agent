@@ -161,7 +161,7 @@ flowchart LR
     M11 -.-> CORE(("model / tools<br/>节点"))
 ```
 
-*中间件按注册顺序层层包裹核心节点；`GuardrailMiddleware` 必须排在 `ToolErrorHandlingMiddleware` 之前（权限拒绝是短路而非异常），`StreamingModelMiddleware` 必须在最内层（离真实模型调用最近，保证 `DatasourceRoutingMiddleware` 纠正重试时两次调用都能完整流式输出）。收尾类中间件（Summarization / Title / MemoryExtraction）挂在 `aafter_agent`，图中未画出执行顺序层级。*
+*中间件按注册顺序层层包裹核心节点；`GuardrailMiddleware` 必须排在 `ToolErrorHandlingMiddleware` 之前（权限拒绝是短路而非异常），`StreamingModelMiddleware` 必须在最内层（离真实模型调用最近，保证 `DatasourceRoutingMiddleware` 纠正重试时两次调用都能完整流式输出）。收尾类中间件（Summarization / Title / MemoryCapture）挂在 `aafter_agent`，图中未画出执行顺序层级。*
 
 | 中间件 | 钩子 | 职责 |
 |---|---|---|
@@ -176,7 +176,7 @@ flowchart LR
 | `LoopDetection` | abefore_model | 连续 3 次相同调用短路，防止死循环 |
 | `Summarization` | aafter_agent | 会话结束后按可配置触发条件（messages/tokens/fraction）压缩历史 |
 | `Title` | aafter_agent | 首轮结束后异步生成会话标题 |
-| `MemoryExtraction` | aafter_agent | 会话结束后起两个独立 fire-and-forget 任务：提取 Facts（L3）+ 更新用户画像/时间线（L1/L2） |
+| `MemoryCapture` | aafter_agent | 会话结束后在同一事务内写 `memory_event`+`memory_update_job`（不调用 LLM），真正的 Facts 提取/画像更新由常驻的 `MemoryUpdateWorker` 异步消费 |
 | `DatasourceRouting` 业务专属 | awrap_model_call | `datasource_id` 已配置但模型未调用 `query_database` 时注入纠正提示重试一次 |
 | `StreamingModel` ⚠️关键顺序 | awrap_model_call | 绕开内置 `ainvoke`，改用 `.astream()` 逐块拉取并推送 custom 通道 |
 
@@ -292,7 +292,7 @@ flowchart TB
 | 实现 | 执行机制 | 已知限制 |
 |---|---|---|
 | `LocalSandbox` | 宿主机子进程（`subprocess.Popen` + `asyncio.to_thread`），cwd 固定为会话 workspace 目录，环境变量经 `env_policy` 清洗 | POSIX 下 `RLIMIT_AS` 限制内存，Windows 无此防护 |
-| `DockerSandbox` | 一次性 `--rm` 容器执行命令，文件操作委托给内部 `LocalSandbox` | 默认镜像不含 Node.js；暂不支持 stdin 管道 |
+| `DockerSandbox` | 一次性容器执行命令，文件操作委托给内部 `LocalSandbox`；stdin 通过一次性文件安全桥接 | 默认镜像不含 Node.js |
 
 两者都通过 `SandboxProvider`（`acquire`/`release`）抽象与 `sandbox_registry.py` 全局单例解耦，启动时按 `SANDBOX_PROVIDER` 配置项二选一。
 
@@ -313,32 +313,61 @@ checkpoint / 长期存储 / 压缩衔接"是两个不同维度的划分，不要
   `preference`/`knowledge`/`context`/`behavior`/`goal` 五分类之一
 
 L1/L2 是随对话持续演进的整段摘要，不参与语义检索，按 `user_id` 整体存取
-（Postgres `user_memory_profile` 表，`UserProfileStore`）；L3 沿用原本的
-Elasticsearch 向量存储，按当前问题做 kNN + Rerank 检索。压缩机制
-（`MemoryCompressor`）介于短期 checkpoint 和长期存储之间，产出的结构化摘要
-写入 L3（`memory_type=summary`，不属于 Facts 五分类）。
+（Postgres `user_memory_profile` 表，`UserProfileStore`，字段级 Patch +
+乐观锁 `revision`）；L3 的规范化主存是 Postgres `user_memory_fact`
+（`UserMemoryFactStore`），Elasticsearch 降级为纯粹的可检索投影，通过
+Outbox 模式异步同步（`FactProjector`）。压缩机制（`MemoryCompressor`）
+介于短期 checkpoint 和长期存储之间，产出的结构化摘要直接写入
+`user_memory_fact`（`category=summary`，不经过下面的 Delta 流水线，因为
+压缩本身就是确定性触发、内容已经生成好了）。
+
+L1/L2、L3 的更新不再是请求路径里的 fire-and-forget 调用，而是"持久化任务 +
+常驻 Worker 消费"（详见
+[《raster-agent 长期记忆重构设计》](raster-agent长期记忆重构设计.md) 与
+[《记忆系统技术文档》](记忆系统技术文档.md)）：
 
 ```mermaid
 flowchart LR
     subgraph inject["请求前 — 注入"]
-        U["user_id"] --> PROFILE["UserProfileStore.get()<br/>L1/L2 画像+时间线"]
-        PROFILE --> SP["拼进临时 system_prompt<br/>不落 checkpoint<br/>（画像在前，Facts 在后）"]
-        Q["最后一条 HumanMessage"] --> KNN["ES kNN 粗召回<br/>candidate_k 条（L3）"]
+        U["user_id"] --> CACHE{"命中 Run 级<br/>memory_cache?"}
+        CACHE -->|否| PROFILE["UserProfileStore.get()<br/>L1/L2 画像+时间线"]
+        Q["最后一条 HumanMessage"] --> CACHE
+        CACHE -->|否| KNN["ES kNN 粗召回<br/>candidate_k 条（L3 投影）"]
         KNN --> RR["Reranker 精排<br/>top_n 条"]
-        RR --> FILTER["min_recall_score<br/>过滤 + token 预算截断"]
-        FILTER --> SP
+        RR --> BUILD["MemoryContextBuilder<br/>统一 token 预算裁剪"]
+        PROFILE --> BUILD
+        BUILD --> SP["渲染 &lt;memory&gt; 块<br/>拼进临时 system_prompt<br/>不落 checkpoint"]
+        CACHE -->|是| SP
     end
 
-    subgraph after["会话结束后 — 提取/更新/压缩"]
-        MSG["本轮完整对话"] --> EXT["MemoryExtractor（L3）<br/>LLM 提取 preference/knowledge/<br/>context/behavior/goal"]
-        EXT --> DUP{"与已有记忆<br/>相似度判定"}
-        DUP -->|"≥0.92 重复"| SKIP["跳过"]
-        DUP -->|"≥0.75 冲突"| ARCHIVE["旧记忆归档<br/>superseded_by=new_id"]
-        DUP -->|否则| SAVE["写入 ES<br/>status=pending/active"]
-        MSG --> PROF2["UserProfileUpdater（L1/L2）<br/>合并现有画像+本轮对话重写"]
-        PROF2 --> UPSERT["upsert 到 user_memory_profile"]
-        MSG --> COMP["MemoryCompressor<br/>超过阈值时压缩"]
-        COMP --> SUM["结构化摘要 JSON<br/>渲染为 AIMessage 插入 checkpoint<br/>+ 写入 ES（memory_type=summary）"]
+    subgraph after["会话结束后 — 捕获（同步写库，不调用 LLM）"]
+        MSG["watermark 之后的新增消息"] --> CLEAN["清洗：只留 User+最终 AI 回复"]
+        CLEAN --> TX["事务写入<br/>memory_event + memory_update_job"]
+    end
+
+    subgraph worker["MemoryUpdateWorker 常驻消费（N 个并发）"]
+        TX --> CLAIM["claim_next()<br/>FOR UPDATE SKIP LOCKED + 防抖"]
+        CLAIM --> LLM["一次结构化 LLM 调用<br/>产出 MemoryDelta"]
+        LLM --> VALID["validate_delta()<br/>证据范围/状态迁移/敏感信息"]
+        VALID -->|拒绝| DEAD["mark_retry → 达上限转 dead"]
+        VALID -->|通过| APPLY["MemoryApplyEngine"]
+        APPLY --> PPATCH["Profile Patch<br/>乐观锁 revision"]
+        APPLY --> FOP["Fact Operation<br/>add/update/supersede/archive/reinforce"]
+        FOP --> DEDUP{"normalize_fact()<br/>精确匹配?"}
+        DEDUP -->|是| REINFORCE["reinforce：不新增，<br/>只更新访问统计"]
+        DEDUP -->|否| SAVE["写入 user_memory_fact<br/>+ 同事务写 memory_outbox"]
+    end
+
+    subgraph projector["FactProjector 常驻消费"]
+        SAVE --> OUTBOX["claim_outbox_batch()"]
+        OUTBOX --> ACTIVE{"status == active?"}
+        ACTIVE -->|是| INDEX["写入/刷新 ES 投影"]
+        ACTIVE -->|否| REMOVE["从 ES 投影删除"]
+    end
+
+    subgraph comp["会话过长时"]
+        MSG2["本轮完整消息历史"] --> COMPZ["MemoryCompressor<br/>超过阈值时压缩"]
+        COMPZ --> SUM["结构化摘要<br/>渲染为 AIMessage 插入 checkpoint<br/>+ 直接写入 user_memory_fact（category=summary）"]
     end
 
     subgraph stale["后台周期任务"]
@@ -346,21 +375,37 @@ flowchart LR
     end
 ```
 
-*注入路径是同步的、请求内联的（`MemoryInjectionMiddleware`）；L3 提取、L1/L2
-更新、压缩都是异步的、会话收尾后各自独立的 fire-and-forget 任务
-（`MemoryExtractionMiddleware` 同时起 Facts 提取和画像更新两个任务，互不
-依赖；`SummarizationMiddleware` 独立触发压缩）；陈旧复核是独立于单次会话的
-全局后台任务。*
+*注入路径是同步的、请求内联的（`MemoryInjectionMiddleware` +
+`MemoryContextBuilder`，带 Run 级缓存）；捕获是同步写库但不调 LLM
+（`MemoryCaptureMiddleware`）；真正的语义判断（Facts 提取、画像更新）发生在
+进程内常驻的 `MemoryUpdateWorker`，不依赖某一次请求的生命周期，进程重启
+不丢失待处理任务；`SummarizationMiddleware` 独立触发压缩；陈旧复核是独立于
+单次会话的全局后台任务。*
 
 ### 关键设计点
 
-- **L1/L2 是整段重写，不是增量 diff** — `UserProfileUpdater` 每次把"现有画像/
-  时间线 + 本轮对话"整体喂给模型，产出重写后的完整内容，旧内容是否保留由
-  模型判断，不做程序化的字段合并。
+- **L1/L2 是字段级 Patch，不是整段重写** — LLM 只对确实需要更新的字段输出
+  `set`/`merge`/`clear` 操作，没有信息量的字段不产生 Patch，天然保留未提及
+  字段的历史内容；写入走乐观锁（`revision`），两个并发的 Worker 任务不会
+  互相覆盖。
+- **Facts 去重/冲突是确定性的，不依赖向量相似度** — `normalize_fact()`
+  规范化文本精确匹配才判定重复（转 `reinforce`）；替代旧 Fact 只能来自 LLM
+  显式输出的 `supersede` 操作（需要给出旧 Fact ID、新内容、理由、证据），
+  "相似"不再自动等价于"冲突"。
+- **持久化任务队列** — `memory_event`/`memory_update_job` 落库后由
+  `MemoryUpdateWorker` 消费（`FOR UPDATE SKIP LOCKED` + 租约 + 重试退避），
+  跟旧版本 `asyncio.create_task()` 的本质区别是进程崩溃不丢数据。
 - **摘要以 AIMessage 插入** — 而非 SystemMessage，因为 Qwen/vLLM 的 chat template 要求 system 消息必须在最前面。
-- **敏感信息拦截** — `save()`/`update()` 前经 `contains_sensitive_info()` 正则规则检测（API key、连接串、身份证、银行卡等），只覆盖 L3，L1/L2 当前没有接入敏感信息过滤。
-- **降级策略** — Reranker 调用失败时降级为纯 kNN 排序结果；审计写入失败静默降级，不拖垮主流程；L1/L2 更新失败只记 warning，不影响 L3 提取或主对话流程。
-- **陈旧归档非物理删除** — `sweep_stale()` 全量扫描 L3（不分 user_id），归档条件满足任一：`expires_at` 已过期，或重要度低于阈值且访问次数为 0 且创建时间早于 `max_age_days`；L1/L2 是单行 upsert，没有陈旧归档的概念。
+- **敏感信息拦截覆盖两条写入路径** — Delta 流水线里 `validate_delta()`
+  校验 Profile Patch 和 Fact 内容；工具/管理 API 的直接写入路径复用
+  `MemoryManager.is_sensitive_content()`，两条路径规则一致。
+- **降级策略** — Reranker 调用失败时降级为纯 kNN 排序结果；ES 投影写入
+  失败只重试 Outbox 记录本身，不回滚已提交的 PostgreSQL 事务（最终一致）；
+  审计写入失败静默降级，不拖垮主流程。
+- **陈旧归档非物理删除** — `sweep_stale()` 全量扫描 `user_memory_fact`
+  （不分 user_id），归档条件满足任一：`expires_at` 已过期，或重要度低于
+  阈值且访问次数为 0 且创建时间早于 `max_age_days`；L1/L2 目前没有对应的
+  陈旧归档机制。
 
 ---
 
@@ -373,8 +418,10 @@ flowchart LR
 | `conversation_store.py` | `conversations` | 会话元数据 |
 | `message_store.py` | `conversation_messages` | REST 历史查询用的冗余消息副本（含 thinking/tool_calls/references），与 checkpointer 独立维护 |
 | `memory_audit_store.py` | `memory_audit_logs` | 记忆操作审计日志（辅助能力，失败静默降级） |
-| `memory_jobs_store.py` | `memory_jobs` | 记忆后处理任务状态流转，供崩溃恢复 |
-| `user_profile_store.py` | `user_memory_profile` | 用户画像与时间线（记忆体系 L1/L2），`user_id` 主键，整行 upsert |
+| `memory_event_store.py` | `memory_event` | 记忆捕获事件（清洗后的不可变对话增量），`to_message_id` 兼作 watermark |
+| `memory_update_job_store.py` | `memory_update_job` | 记忆更新任务状态机（`pending`/`processing`/`succeeded`/`dead`），供 `MemoryUpdateWorker` 消费 |
+| `user_memory_fact_store.py` | `user_memory_fact` + `memory_outbox` | Facts 规范化主存 + 同步进 ES 投影的 Outbox 队列 |
+| `user_profile_store.py` | `user_memory_profile` + `user_memory_profile_field_meta` | 用户画像与时间线（记忆体系 L1/L2），字段级 Patch + 乐观锁 `revision`，`field_meta` 记录每个字段的更新来源 |
 | `skill_settings_store.py` | `user_skill_settings` | 按用户技能禁用记录（只存禁用，默认全开） |
 | `tool_permission_store.py` | `user_tool_permissions` | 按用户工具级权限拒绝记录 |
 
@@ -502,7 +549,14 @@ skills/
 - **ReadBeforeWriteMiddleware 尚未实现** — 写文件前应先读过、内容哈希未变才允许写，DeerFlow 有此设计但本工程仍是待办。
 - **记忆冲突检测覆盖有限** — 目前只做相似度阈值判定归档，更复杂的语义冲突检测未覆盖。
 - **Windows 沙箱资源限制缺失** — `LocalSandbox` 的内存限制（`RLIMIT_AS`）只在 POSIX 生效。
-- **DockerSandbox 功能子集** — 默认镜像不含 Node.js，暂不支持 stdin 管道。
+- **DockerSandbox 镜像能力取决于部署配置** — 默认镜像不含 Node.js，涉及 JavaScript
+  Skill 时必须使用经过审计且按 digest 锁定的自定义镜像。
+- **沙箱与工作区尚未达到不可信代码隔离标准** — 身份目录键、容器最小权限、CPU/PID/磁盘配额、
+  工作区生命周期、密钥能力和审计闭环的补全方案见
+  [《沙箱与工作区安全加固设计》](./沙箱与工作区安全加固设计.md)。在该文档验收项完成前，
+  Local Provider 仅允许开发者本地测试；测试、预发布和生产等所有线上环境严格强制
+  Docker Provider，配置错误或 Docker 初始化失败时必须阻止应用就绪，且不存在 Local
+  降级路径。在加固设计验收项完成前，Docker Provider 也不能对外宣称为完整强隔离边界。
 
 ---
 

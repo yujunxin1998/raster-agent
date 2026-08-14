@@ -70,15 +70,19 @@ async def test_write_file_to_outputs_directory(tmp_path: Path) -> None:
     assert content == "# 结果"
 
 
-async def test_execute_command_rejects_stdin_without_touching_docker(tmp_path: Path) -> None:
+async def test_execute_command_bridges_stdin_through_temporary_file(tmp_path: Path) -> None:
     docker_client = MagicMock()
+    docker_client.containers.run.return_value = _fake_container(exit_code=0)
     sandbox = _make_sandbox(tmp_path, docker_client)
 
     result = await sandbox.execute_command(["echo", "hi"], stdin=b"data")
 
-    assert result.status == SandboxCommandStatus.FAILED
-    assert "SANDBOX_PROVIDER=local" in result.stderr_text()
-    docker_client.containers.run.assert_not_called()
+    assert result.status == SandboxCommandStatus.SUCCESS
+    called_command = docker_client.containers.run.call_args.args[1]
+    assert called_command[:2] == ["sh", "-c"]
+    assert 'exec "$@"' in called_command[2]
+    assert called_command[-2:] == ["echo", "hi"]
+    assert list((tmp_path / "thread" / "workspace").glob(".sandbox-input-*")) == []
 
 
 async def test_execute_command_translates_sys_executable_to_python3(tmp_path: Path) -> None:
@@ -121,6 +125,15 @@ async def test_execute_command_mounts_workspace_and_project_root(tmp_path: Path)
     assert volumes[str(tmp_path / "project")] == {"bind": "/app", "mode": "ro"}
     assert kwargs["working_dir"] == "/workspace"
     assert kwargs["mem_limit"] == "256m"
+    assert kwargs["memswap_limit"] == "256m"
+    assert kwargs["nano_cpus"] == 1_000_000_000
+    assert kwargs["pids_limit"] == 64
+    assert kwargs["network_disabled"] is True
+    assert kwargs["read_only"] is True
+    assert kwargs["cap_drop"] == ["ALL"]
+    assert kwargs["security_opt"] == ["no-new-privileges:true"]
+    assert kwargs["user"] == "65534:65534"
+    assert "/tmp" in kwargs["tmpfs"]
 
 
 async def test_execute_command_failed_status(tmp_path: Path) -> None:
@@ -159,6 +172,18 @@ async def test_execute_command_truncates_output(tmp_path: Path) -> None:
     assert result.status == SandboxCommandStatus.OUTPUT_TRUNCATED
     assert result.truncated is True
     assert len(result.stdout) == 10
+
+
+async def test_execute_command_truncates_stderr_too(tmp_path: Path) -> None:
+    docker_client = MagicMock()
+    docker_client.containers.run.return_value = _fake_container(exit_code=1, stderr=b"e" * 20)
+    sandbox = _make_sandbox(tmp_path, docker_client, max_output_bytes=10)
+
+    result = await sandbox.execute_command(["python3", "-c", "raise SystemExit(1)"])
+
+    assert result.status == SandboxCommandStatus.OUTPUT_TRUNCATED
+    assert result.truncated is True
+    assert len(result.stderr) == 10
 
 
 async def test_execute_command_container_always_removed(tmp_path: Path) -> None:
