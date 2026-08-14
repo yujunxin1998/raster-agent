@@ -244,6 +244,7 @@ async def lifespan(app: FastAPI):
             max_pids=settings.SANDBOX_MAX_PIDS,
             tmpfs_size_mb=settings.SANDBOX_TMPFS_SIZE_MB,
             container_user=settings.DOCKER_SANDBOX_USER,
+            network_enabled=settings.SANDBOX_NETWORK_ENABLED,
         )
     elif sandbox_provider_name == "local":
         init_local_sandbox_provider(
@@ -399,7 +400,7 @@ app = FastAPI(
 app.add_middleware(EvalMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=settings.CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

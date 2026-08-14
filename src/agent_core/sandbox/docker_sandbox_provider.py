@@ -36,6 +36,7 @@ class DockerSandboxProvider(SandboxProvider):
         max_pids: int = 64,
         tmpfs_size_mb: int = 64,
         container_user: str = "65534:65534",
+        network_enabled: bool = False,
     ) -> None:
         """初始化 Docker 沙箱提供者。
 
@@ -47,6 +48,11 @@ class DockerSandboxProvider(SandboxProvider):
             default_timeout_seconds: 沙箱内命令的默认超时秒数。
             max_output_bytes: 沙箱内命令 stdout 的截断上限。
             max_memory_mb: 容器内存上限（cgroup 强制）。
+            max_cpus: 容器 CPU 配额上限。
+            max_pids: 容器内进程数上限。
+            tmpfs_size_mb: 容器内 `/tmp` 可写 tmpfs 的大小上限。
+            container_user: 容器内运行用户（`uid:gid`）。
+            network_enabled: 是否允许沙箱容器访问网络。
         """
         self._workspace_manager = workspace_manager
         self._docker_client = docker_client
@@ -59,6 +65,7 @@ class DockerSandboxProvider(SandboxProvider):
         self._max_pids = max_pids
         self._tmpfs_size_mb = tmpfs_size_mb
         self._container_user = container_user
+        self._network_enabled = network_enabled
 
     async def acquire(self, conversation_id: str, user_id: str | None = None) -> Sandbox:
         workspace = self._workspace_manager.get_or_create(conversation_id, user_id)
@@ -74,6 +81,7 @@ class DockerSandboxProvider(SandboxProvider):
             max_pids=self._max_pids,
             tmpfs_size_mb=self._tmpfs_size_mb,
             container_user=self._container_user,
+            network_enabled=self._network_enabled,
         )
 
     async def release(self, sandbox: Sandbox) -> None:
@@ -93,6 +101,7 @@ async def init_docker_sandbox_provider(
     max_pids: int = 64,
     tmpfs_size_mb: int = 64,
     container_user: str = "65534:65534",
+    network_enabled: bool = False,
 ) -> None:
     """应用启动时调用一次，构造 DockerSandboxProvider 并登记为全局单例。
 
@@ -128,6 +137,7 @@ async def init_docker_sandbox_provider(
             max_pids=max_pids,
             tmpfs_size_mb=tmpfs_size_mb,
             container_user=container_user,
+            network_enabled=network_enabled,
         )
     )
     logger.info(f"[DockerSandboxProvider] 初始化完成 image={image}")

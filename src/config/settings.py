@@ -38,6 +38,9 @@ class SystemConfiguration(BaseSettings):
     # 把它解析成"当前页面（前端 SPA）自己的地址 + 这段路径"而不是本服务的地址，
     # 点击后打不开。
     PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    CORS_ALLOW_ORIGIN_REGEX: str = os.getenv(
+        "CORS_ALLOW_ORIGIN_REGEX", r"http://(localhost|127\.0\.0\.1)(:\d+)?$"
+    )
 
     # ================ 大语言模型环境依赖 ========================
     API_KEY: str = os.getenv("OPENAI_API_KEY", os.getenv("API_KEY", ""))
@@ -179,6 +182,7 @@ class SystemConfiguration(BaseSettings):
     SANDBOX_MAX_CPUS: float = float(os.getenv("SANDBOX_MAX_CPUS", "1.0"))
     SANDBOX_MAX_PIDS: int = int(os.getenv("SANDBOX_MAX_PIDS", "64"))
     SANDBOX_TMPFS_SIZE_MB: int = int(os.getenv("SANDBOX_TMPFS_SIZE_MB", "64"))
+    SANDBOX_NETWORK_ENABLED: bool = os.getenv("SANDBOX_NETWORK_ENABLED", "false").lower() == "true"
     # run_python/run_command 的 stdout/stderr 超过这个行数时，不再把完整内容塞进
     # 模型上下文——只给一份头尾预览，完整内容落盘到会话 workspace 里，模型需要时
     # 自己用 read_file 读取（用磁盘 IO 换 token/上下文压力）。

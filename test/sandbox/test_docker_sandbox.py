@@ -26,6 +26,8 @@ def _make_sandbox(tmp_path: Path, docker_client, *, max_output_bytes: int = 2 * 
         default_timeout_seconds=30,
         max_output_bytes=max_output_bytes,
         max_memory_mb=256,
+        max_pids=64,
+        network_enabled=False,
     )
 
 

@@ -20,6 +20,11 @@ workspace 目录），所以这三个方法直接组合一个 `LocalSandbox` 实
    绝对路径参数等价替换成 `/app` 前缀——这样技能脚本不需要感知自己是被容器
    还是宿主机进程执行。
 
+运行时安全边界：
+- 容器根文件系统只读，只开放会话 workspace 和受限 `/tmp` 写入；项目目录只读。
+- 丢弃全部 Linux capabilities，启用 `no-new-privileges`，限制内存和进程数。
+- 网络默认关闭；只有显式设置 `SANDBOX_NETWORK_ENABLED=true` 才允许容器联网。
+
 已知限制（显式记录而非假装解决）：
 - 默认镜像 `python:3.11-slim` 不含 Node.js，涉及 `.js` 脚本的技能在 Docker
   模式下会失败，需要通过 `DOCKER_SANDBOX_IMAGE` 换成自带 node 的镜像。
@@ -69,6 +74,7 @@ class DockerSandbox(Sandbox):
         max_pids: int = 64,
         tmpfs_size_mb: int = 64,
         container_user: str = "65534:65534",
+        network_enabled: bool = False,
     ) -> None:
         """初始化 Docker 沙箱。
 
@@ -80,6 +86,11 @@ class DockerSandbox(Sandbox):
             default_timeout_seconds: 命令未显式指定 timeout 时使用的默认超时秒数。
             max_output_bytes: stdout 截断上限。
             max_memory_mb: 容器内存上限（cgroup 真正强制，比 Local 更强）。
+            max_cpus: 容器 CPU 配额上限（换算为 `nano_cpus`）。
+            max_pids: 容器内进程数上限，防止 fork bomb。
+            tmpfs_size_mb: 容器内 `/tmp` 可写 tmpfs 的大小上限。
+            container_user: 容器内运行用户（`uid:gid`），默认非 root。
+            network_enabled: 是否允许沙箱容器访问网络，默认关闭。
         """
         self._workspace = workspace
         self._docker_client = docker_client
@@ -92,6 +103,7 @@ class DockerSandbox(Sandbox):
         self._max_pids = max_pids
         self._tmpfs_size_mb = tmpfs_size_mb
         self._container_user = container_user
+        self._network_enabled = network_enabled
         self._local = LocalSandbox(
             workspace,
             default_timeout_seconds=default_timeout_seconds,
@@ -218,7 +230,7 @@ class DockerSandbox(Sandbox):
                 memswap_limit=f"{self._max_memory_mb}m",
                 nano_cpus=int(self._max_cpus * 1_000_000_000),
                 pids_limit=self._max_pids,
-                network_disabled=True,
+                network_disabled=not self._network_enabled,
                 read_only=True,
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges:true"],
