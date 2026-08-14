@@ -1,11 +1,11 @@
 """持久化用户长期画像与时间线（三层记忆架构的 L1/L2）。
 
-这两层是"随用户使用持续演进的整段摘要"（画像：用户是谁；时间线：用户做过
-什么），不参与语义检索，只按 `user_id` 整体取出/整体覆盖——跟需要 kNN 向量
-检索的 Facts（L3，走 `ElasticsearchMemoryStore`）性质完全不同，不适合塞进
-向量索引，改用项目已有的 Postgres DAO 套路（对齐 `conversation_store.py`
-"类 + 显式注入 pool + `CREATE TABLE IF NOT EXISTS`"的写法），一个用户一行，
-`upsert` 整体覆盖更新。
+Memory v2：整行覆盖的 `upsert()` 已替换为 `apply_patches()`——按 `revision`
+做乐观并发控制，只有调用方持有的快照版本号与当前一致才会写入成功，避免两个
+并发的 MemoryUpdateWorker 任务互相覆盖对方的更新（旧版本问题，见
+docs/raster-agent长期记忆重构设计.md §2.1）。`user_memory_profile_field_meta`
+记录每个字段最近一次更新的来源事件与置信度，供管理 API 展示"这条画像信息
+是从哪句话推断出来的"。
 """
 from __future__ import annotations
 
@@ -14,9 +14,15 @@ from typing import Optional
 import asyncpg
 from loguru import logger
 
+_PROFILE_FIELDS = (
+    "work_context", "personal_context", "top_of_mind",
+    "recent_months", "earlier_context", "long_term_background",
+)
+_EMPTY_PROFILE = {field: "" for field in _PROFILE_FIELDS}
+
 
 class UserProfileStore:
-    """`user_memory_profile` 表的读写封装。"""
+    """`user_memory_profile` / `user_memory_profile_field_meta` 表的读写封装。"""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
@@ -33,14 +39,31 @@ class UserProfileStore:
                 recent_months        TEXT        NOT NULL DEFAULT '',
                 earlier_context      TEXT        NOT NULL DEFAULT '',
                 long_term_background TEXT        NOT NULL DEFAULT '',
+                revision             BIGINT      NOT NULL DEFAULT 0,
                 updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        # 本仓库没有 Alembic，历史库缺列时按幂等 ALTER 补齐（见 main.py 接线说明）。
+        await self._pool.execute(
+            "ALTER TABLE user_memory_profile ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0"
+        )
+        await self._pool.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_memory_profile_field_meta (
+                user_id         TEXT        NOT NULL,
+                field_name      TEXT        NOT NULL,
+                updated_at      TIMESTAMPTZ NOT NULL,
+                source_event_id TEXT,
+                confidence      NUMERIC(3,2) NOT NULL DEFAULT 1.0,
+                PRIMARY KEY (user_id, field_name)
             )
             """
         )
         logger.info("[UserProfileStore] 初始化完成")
 
     async def get(self, user_id: str) -> Optional[dict]:
-        """查询某用户的画像与时间线。
+        """查询某用户的画像与时间线（外部 API 契约，字段集合不变）。
 
         Args:
             user_id: 归属用户 ID。
@@ -57,47 +80,150 @@ class UserProfileStore:
         )
         return dict(row) if row else None
 
-    async def upsert(
-        self,
-        user_id: str,
-        *,
-        work_context: str,
-        personal_context: str,
-        top_of_mind: str,
-        recent_months: str,
-        earlier_context: str,
-        long_term_background: str,
-    ) -> None:
-        """整体覆盖写入某用户的画像与时间线（不存在则新建）。
+    async def get_with_revision(self, user_id: str) -> dict:
+        """供 MemoryUpdateWorker 读取快照使用：始终返回一行，不存在时 revision=0。
 
         Args:
             user_id: 归属用户 ID。
-            work_context: 职业角色、公司、关键项目、主力技术栈。
-            personal_context: 语言能力、沟通偏好、兴趣领域。
-            top_of_mind: 当前关注的多个并行焦点，更新频率最高。
-            recent_months: 近 1-3 个月的详细活动摘要。
-            earlier_context: 3-12 个月前的重要模式。
-            long_term_background: 长期不变的基础背景。
+
+        Returns:
+            六个字段 + `revision` 的字典；新用户返回全空字段、`revision=0`。
         """
-        await self._pool.execute(
-            """
-            INSERT INTO user_memory_profile (
-                user_id, work_context, personal_context, top_of_mind,
-                recent_months, earlier_context, long_term_background, updated_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-            ON CONFLICT (user_id) DO UPDATE SET
-                work_context = EXCLUDED.work_context,
-                personal_context = EXCLUDED.personal_context,
-                top_of_mind = EXCLUDED.top_of_mind,
-                recent_months = EXCLUDED.recent_months,
-                earlier_context = EXCLUDED.earlier_context,
-                long_term_background = EXCLUDED.long_term_background,
-                updated_at = NOW()
-            """,
-            user_id, work_context, personal_context, top_of_mind,
-            recent_months, earlier_context, long_term_background,
+        row = await self._pool.fetchrow(
+            "SELECT work_context, personal_context, top_of_mind, "
+            "recent_months, earlier_context, long_term_background, revision "
+            "FROM user_memory_profile WHERE user_id = $1",
+            user_id,
         )
+        if row is None:
+            return {**_EMPTY_PROFILE, "revision": 0}
+        return dict(row)
+
+    async def apply_patches(
+        self,
+        user_id: str,
+        patches: list[dict],
+        expected_revision: int,
+        source_event_id: Optional[str] = None,
+    ) -> bool:
+        """按乐观锁把一批 Profile Patch 应用到指定用户的画像/时间线。
+
+        `patches` 里每个 patch 至少含 `field`（六个合法字段之一）、
+        `op`（`set`/`merge`/`clear`）；`set`/`merge` 需要 `value`（模型已经把
+        旧内容与新信息融合成完整字段文本，两种 op 在存储层都是整字段赋值，
+        区别只在于语义审计——"merge"代表模型主动保留了旧内容）。`clear`
+        忽略 `value`，把字段清空。
+
+        Args:
+            user_id: 归属用户 ID。
+            patches: Patch 列表，每项为 dict，可选 `confidence`（用于写
+                field_meta，默认 1.0）。
+            expected_revision: 调用方读取快照时看到的 revision；新用户传 0。
+            source_event_id: 触发本次更新的 memory_event ID，写入 field_meta。
+
+        Returns:
+            是否写入成功；`expected_revision` 与当前不一致（并发冲突）或新用户
+            路径被抢先创建时返回 False，调用方应重新读取快照后决定重试或重放。
+        """
+        if not patches:
+            return True
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT work_context, personal_context, top_of_mind, "
+                    "recent_months, earlier_context, long_term_background, revision "
+                    "FROM user_memory_profile WHERE user_id = $1 FOR UPDATE",
+                    user_id,
+                )
+                if row is None:
+                    if expected_revision != 0:
+                        return False
+                    current = dict(_EMPTY_PROFILE)
+                else:
+                    if row["revision"] != expected_revision:
+                        return False
+                    current = {field: row[field] for field in _PROFILE_FIELDS}
+
+                updated = dict(current)
+                for patch in patches:
+                    field = patch["field"]
+                    if field not in _PROFILE_FIELDS:
+                        continue
+                    op = patch["op"]
+                    if op == "clear":
+                        updated[field] = ""
+                    else:  # set / merge：模型已产出完整字段文本，存储层不区分处理
+                        updated[field] = str(patch.get("value", ""))
+
+                if row is None:
+                    await conn.execute(
+                        """
+                        INSERT INTO user_memory_profile (
+                            user_id, work_context, personal_context, top_of_mind,
+                            recent_months, earlier_context, long_term_background,
+                            revision, updated_at
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, 1, NOW())
+                        """,
+                        user_id, *(updated[field] for field in _PROFILE_FIELDS),
+                    )
+                else:
+                    # revision 已经在上面的 SELECT ... FOR UPDATE 内校验过，且行锁
+                    # 持续到事务提交，这里的 UPDATE 不会再被并发写入抢先。
+                    await conn.execute(
+                        """
+                        UPDATE user_memory_profile SET
+                            work_context = $2, personal_context = $3, top_of_mind = $4,
+                            recent_months = $5, earlier_context = $6, long_term_background = $7,
+                            revision = revision + 1, updated_at = NOW()
+                        WHERE user_id = $1 AND revision = $8
+                        """,
+                        user_id, *(updated[field] for field in _PROFILE_FIELDS), expected_revision,
+                    )
+
+                for patch in patches:
+                    field = patch["field"]
+                    if field not in _PROFILE_FIELDS:
+                        continue
+                    await conn.execute(
+                        """
+                        INSERT INTO user_memory_profile_field_meta
+                            (user_id, field_name, updated_at, source_event_id, confidence)
+                        VALUES ($1, $2, NOW(), $3, $4)
+                        ON CONFLICT (user_id, field_name) DO UPDATE SET
+                            updated_at = EXCLUDED.updated_at,
+                            source_event_id = EXCLUDED.source_event_id,
+                            confidence = EXCLUDED.confidence
+                        """,
+                        user_id, field, source_event_id, float(patch.get("confidence", 1.0)),
+                    )
+        return True
+
+    async def get_field_sources(self, user_id: str) -> list[dict]:
+        """查询某用户各画像字段的最近更新来源，供管理 API 展示。
+
+        Args:
+            user_id: 归属用户 ID。
+
+        Returns:
+            按字段名的来源记录列表，查询失败或用户无记录时返回空列表。
+        """
+        rows = await self._pool.fetch(
+            "SELECT field_name, updated_at, source_event_id, confidence "
+            "FROM user_memory_profile_field_meta WHERE user_id = $1",
+            user_id,
+        )
+        return [dict(row) for row in rows]
+
+    async def delete(self, user_id: str) -> None:
+        """彻底删除某用户的画像/时间线与字段来源记录（设计文档 §9.2"彻底删除用户记忆"）。
+
+        Args:
+            user_id: 归属用户 ID。
+        """
+        await self._pool.execute("DELETE FROM user_memory_profile WHERE user_id = $1", user_id)
+        await self._pool.execute("DELETE FROM user_memory_profile_field_meta WHERE user_id = $1", user_id)
 
 
 _store: UserProfileStore | None = None

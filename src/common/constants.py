@@ -38,18 +38,19 @@ class MemoryType(str, Enum):
 
 
 class MemoryStatus(str, Enum):
-    """长期记忆的生命周期状态。"""
+    """长期记忆（Fact）的生命周期状态，对齐 Memory v2 设计文档 §4.4。"""
 
     ACTIVE = "active"
     PENDING = "pending"
     ARCHIVED = "archived"
+    SUPERSEDED = "superseded"  # 被显式 supersede 操作取代（不同于 archived：archived 无替代者）
     EXPIRED = "expired"  # 仅在读取时按 expires_at 派生展示，不物理写入存储
 
 
 class MemorySource(str, Enum):
     """记忆的产生来源，用于审计追溯。"""
 
-    EXTRACTOR = "extractor"
+    EXTRACTOR = "extractor"  # 后台 MemoryUpdateWorker 依据 MemoryDelta 写入
     TOOL = "tool"
     API = "api"
     COMPRESSOR = "compressor"
@@ -66,15 +67,50 @@ class MemoryAuditAction(str, Enum):
     COMPRESS = "compress"
     SAVE_REJECTED = "save_rejected"
     UPDATE_REJECTED = "update_rejected"
+    # Memory v2：MemoryDelta 更新流水线专用动作，对齐设计文档 §9.3。
+    DELTA_GENERATED = "delta_generated"
+    DELTA_REJECTED = "delta_rejected"
+    PROFILE_PATCHED = "profile_patched"
+    FACT_ADDED = "fact_added"
+    FACT_REINFORCED = "fact_reinforced"
+    FACT_SUPERSEDED = "fact_superseded"
+    FACT_ARCHIVED = "fact_archived"
 
 
-class MemoryJobStatus(str, Enum):
-    """记忆后处理任务（提取/压缩）的执行状态。"""
+class MemoryUpdateJobStatus(str, Enum):
+    """`memory_update_job` 状态机，对齐设计文档 §4.2。"""
 
     PENDING = "pending"
-    RUNNING = "running"
-    DONE = "done"
-    FAILED = "failed"
+    PROCESSING = "processing"
+    SUCCEEDED = "succeeded"
+    DEAD = "dead"
+
+
+class ProfilePatchOp(str, Enum):
+    """Profile Patch 的操作类型，对齐设计文档 §5.3。"""
+
+    SET = "set"
+    MERGE = "merge"
+    CLEAR = "clear"
+
+
+class FactOperationType(str, Enum):
+    """Fact Operation 的操作类型，对齐设计文档 §5.4。"""
+
+    ADD = "add"
+    UPDATE = "update"
+    SUPERSEDE = "supersede"
+    ARCHIVE = "archive"
+    REINFORCE = "reinforce"
+
+
+class MemoryOutboxAction(str, Enum):
+    """`memory_outbox` 记录的索引动作类型，对齐设计文档 §7.6。"""
+
+    FACT_CREATED = "fact_created"
+    FACT_UPDATED = "fact_updated"
+    FACT_STATUS_CHANGED = "fact_status_changed"
+    FACT_DELETED = "fact_deleted"
 
 
 class GuardrailDecisionType(str, Enum):

@@ -2,7 +2,7 @@
 
 文档里对应的原 `src/conversation/title_generator.py` 这次没有随基础设施
 一起迁移（仓库里没有 `conversations` 表/DAO，见 README「本工程范围」），
-这里给出一个自包含实现：复用 `MemoryCompressor`/`MemoryExtractor` 已经在
+这里给出一个自包含实现：复用 `MemoryCompressor`/`MemoryUpdateWorker` 已经在
 用的 `init_chat_model` 调用方式 + 新增的 `TITLE_GENERATION` 提示词模板生成
 标题；持久化到 `conversations` 表这一步，通过可选的 `on_title_generated`
 回调交给二期 conversation 层接入时再实现——本中间件不假装自己知道数据要

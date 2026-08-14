@@ -82,3 +82,12 @@ class MemoryAuditLogResponse(BaseModel):
     source: str
     detail: Optional[str]
     created_at: datetime
+
+
+class ProfileFieldSourceResponse(BaseModel):
+    """画像单个字段的最近更新来源（Memory v2 新增，人工闭环 §9.2）。"""
+
+    field_name: str
+    updated_at: datetime
+    source_event_id: Optional[str] = Field(None, description="触发这次更新的 memory_event ID")
+    confidence: float

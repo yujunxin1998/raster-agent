@@ -18,12 +18,13 @@ from typing import Awaitable, Callable, Optional
 from langchain.agents.middleware import AgentMiddleware
 
 from src.agent_core.guardrail.guardrail_provider import GuardrailProvider
+from src.agent_core.memory.memory_context_builder import MemoryContextBuilder
 from src.agent_core.memory.memory_manager import MemoryManager
 from src.agent_core.middlewares.dangling_tool_call import DanglingToolCallMiddleware
 from src.agent_core.middlewares.guardrail import GuardrailMiddleware
 from src.agent_core.middlewares.input_sanitization import InputSanitizationMiddleware
 from src.agent_core.middlewares.loop_detection import LoopDetectionMiddleware
-from src.agent_core.middlewares.memory_extraction import MemoryExtractionMiddleware
+from src.agent_core.middlewares.memory_capture import MemoryCaptureMiddleware
 from src.agent_core.middlewares.memory_injection import MemoryInjectionMiddleware
 from src.agent_core.middlewares.sandbox_middleware import SandboxMiddleware
 from src.agent_core.middlewares.summarization import SummarizationMiddleware
@@ -34,6 +35,8 @@ from src.agent_core.middlewares.tool_error_handling import ToolErrorHandlingMidd
 from src.agent_core.prompts.prompt_factory import PromptFactory
 from src.agent_core.sandbox.sandbox_provider import SandboxProvider
 from src.agent_core.workspace.thread_workspace_manager import ThreadWorkspaceManager
+from src.storage.memory_event_store import MemoryEventStore
+from src.storage.memory_update_job_store import MemoryUpdateJobStore
 
 _DEFAULT_LOOP_DETECTION_THRESHOLD = 3
 
@@ -54,6 +57,9 @@ def build_middlewares(
     sandbox_provider: SandboxProvider,
     workspace_manager: ThreadWorkspaceManager,
     memory_manager: MemoryManager,
+    memory_context_builder: MemoryContextBuilder,
+    memory_event_store: MemoryEventStore,
+    memory_update_job_store: MemoryUpdateJobStore,
     prompt_factory: PromptFactory,
     title_model_settings: TitleModelSettings,
     loop_detection_threshold: int = _DEFAULT_LOOP_DETECTION_THRESHOLD,
@@ -66,7 +72,13 @@ def build_middlewares(
         sandbox_provider: 沙箱提供者，通常传入 `get_sandbox_provider()`。
         workspace_manager: 会话隔离工作区管理器，通常传入
             `get_thread_workspace_manager()`。
-        memory_manager: 记忆机制门面，通常传入 `get_memory_manager()`。
+        memory_manager: 记忆机制门面（压缩摘要写入），通常传入
+            `get_memory_manager()`。
+        memory_context_builder: 统一记忆上下文构建器（Memory v2），通常传入
+            `get_memory_context_builder()`。
+        memory_event_store: 记忆捕获事件存储，通常传入 `get_memory_event_store()`。
+        memory_update_job_store: 记忆更新任务队列，通常传入
+            `get_memory_update_job_store()`。
         prompt_factory: 提示词工厂，供 `TitleMiddleware` 渲染标题生成模板。
         title_model_settings: 标题生成用的 LLM 调用参数。
         loop_detection_threshold: 死循环检测阈值，默认 3（对应旧 supervisor
@@ -81,7 +93,7 @@ def build_middlewares(
         DanglingToolCallMiddleware(),
         InputSanitizationMiddleware(),
         ThreadDataMiddleware(workspace_manager),
-        MemoryInjectionMiddleware(memory_manager),
+        MemoryInjectionMiddleware(memory_context_builder),
         GuardrailMiddleware(guardrail_provider),
         SandboxMiddleware(sandbox_provider),
         ToolAuditMiddleware(),
@@ -96,5 +108,5 @@ def build_middlewares(
             base_url=title_model_settings.base_url,
             on_title_generated=on_title_generated,
         ),
-        MemoryExtractionMiddleware(memory_manager),
+        MemoryCaptureMiddleware(memory_event_store, memory_update_job_store),
     ]

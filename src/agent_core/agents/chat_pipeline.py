@@ -7,8 +7,8 @@
     - REST 层（`chat_router.py`）消费完生成器后只读 `ChatTurnResult`，不转发事件。
     - WS 层（`chat_ws.py`）把每个 yield 的事件原样转发给客户端。
 
-记忆注入/提取/压缩/标题生成/悬空工具调用修复都不需要在这里手写——那些是 Lead
-Agent 中间件流水线（`MemoryInjectionMiddleware`/`MemoryExtractionMiddleware`/
+记忆注入/捕获/压缩/标题生成/悬空工具调用修复都不需要在这里手写——那些是 Lead
+Agent 中间件流水线（`MemoryInjectionMiddleware`/`MemoryCaptureMiddleware`/
 `SummarizationMiddleware`/`TitleMiddleware`/`DanglingToolCallMiddleware`）的
 职责，`build_lead_agent()` 组装时已经自动带上。
 """
@@ -23,7 +23,6 @@ from pathlib import PurePosixPath
 from typing import Any, AsyncGenerator, Optional
 
 from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
-from langchain_core.tools import BaseTool
 from langgraph.graph.message import RemoveMessage
 from loguru import logger
 
@@ -33,6 +32,7 @@ from src.agent_core.eval.emitter import EvalEventEmitter
 from src.agent_core.ingestion import extract_text, is_extractable, is_known_unsupported
 from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.skills import get_skill_manager
+from src.agent_core.tools.registry import ToolDefinition
 from src.agent_core.tools.tool_filter import tool_filter_registry
 from src.agent_core.workspace.thread_workspace import ThreadWorkspace
 from src.agent_core.workspace.thread_workspace_manager import get_thread_workspace_manager
@@ -301,7 +301,7 @@ async def run_chat_turn(
     thinking: bool = False,
     datasource_id: Optional[str] = None,
     file_ids: Optional[list[str]] = None,
-    extra_tools: Optional[list[BaseTool]] = None,
+    extra_tools: Optional[list[ToolDefinition]] = None,
     emitter: Optional[EvalEventEmitter] = None,
     result: ChatTurnResult,
 ) -> AsyncGenerator[dict, None]:
@@ -316,7 +316,9 @@ async def run_chat_turn(
             `delegate_to_database_agent` 读取。
         file_ids: 本轮携带的附件文件 ID 列表（来自上传接口），为空时不影响
             现有行为。
-        extra_tools: 前端本次请求注入的工具（经 `CustomToolConverter` 转换）。
+        extra_tools: 前端本次请求注入的工具定义（经
+            `agent_core.tools.registry.discover_frontend_tools` 转换），
+            与 `ToolRegistry` 快照合并后交给 `build_lead_agent()` 解析。
         emitter: Eval 遥测状态机，为空时跳过埋点。
         result: 调用方传入的累计结果容器，本函数在迭代过程中原地写入。
 
@@ -325,8 +327,9 @@ async def run_chat_turn(
         `tool_response`/`skill_response`/`reference`）。REST 层可以直接丢弃这些
         事件，只读 `result`；WS 层把每个事件原样转发给客户端。
     """
-    agent = build_lead_agent(
+    agent, registry_revision = await build_lead_agent(
         thinking_enabled=thinking, extra_tools=extra_tools, checkpointer=get_checkpointer(), user_id=user_id,
+        conversation_id=conversation_id,
     )
     config = {
         "configurable": {"thread_id": conversation_id, "secrets": {}, "datasource_id": datasource_id},
@@ -334,6 +337,7 @@ async def run_chat_turn(
     }
     context = AgentRuntimeContext(
         conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
+        registry_revision=registry_revision,
     )
 
     message_with_attachments = await _build_message_with_attachments(conversation_id, user_id, message, file_ids)
@@ -384,8 +388,9 @@ async def run_regenerate_turn(
         同 `run_chat_turn`。会话里还没有任何一条用户发言时，生成器直接结束、
         不产出任何事件——没有可重新生成的内容。
     """
-    agent = build_lead_agent(
+    agent, registry_revision = await build_lead_agent(
         thinking_enabled=thinking, extra_tools=None, checkpointer=get_checkpointer(), user_id=user_id,
+        conversation_id=conversation_id,
     )
     config = {
         "configurable": {"thread_id": conversation_id, "secrets": {}, "datasource_id": datasource_id},
@@ -393,6 +398,7 @@ async def run_regenerate_turn(
     }
     context = AgentRuntimeContext(
         conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
+        registry_revision=registry_revision,
     )
 
     state = await agent.aget_state(config)

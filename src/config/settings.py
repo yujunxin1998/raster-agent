@@ -92,24 +92,57 @@ class SystemConfiguration(BaseSettings):
     MEMORY_RECALL_CANDIDATE_K: int = int(os.getenv("MEMORY_RECALL_CANDIDATE_K", "20"))
     MEMORY_MAX_RECALL: int = int(os.getenv("MEMORY_MAX_RECALL", "5"))
     MEMORY_IMPORTANCE_THRESHOLD: int = int(os.getenv("MEMORY_IMPORTANCE_THRESHOLD", "5"))
-    MEMORY_DUPLICATE_SCORE_THRESHOLD: float = float(os.getenv("MEMORY_DUPLICATE_SCORE_THRESHOLD", "0.92"))
-    MEMORY_CONFLICT_SCORE_THRESHOLD: float = float(os.getenv("MEMORY_CONFLICT_SCORE_THRESHOLD", "0.75"))
-    MEMORY_LOW_CONFIDENCE_MARGIN: int = int(os.getenv("MEMORY_LOW_CONFIDENCE_MARGIN", "2"))
     MEMORY_MIN_RECALL_SCORE: float = float(os.getenv("MEMORY_MIN_RECALL_SCORE", "0.3"))
     MEMORY_MAX_CONTEXT_TOKENS: int = int(os.getenv("MEMORY_MAX_CONTEXT_TOKENS", "1000"))
-    MEMORY_JOB_MAX_ATTEMPTS: int = int(os.getenv("MEMORY_JOB_MAX_ATTEMPTS", "3"))
     MEMORY_EXTRACT_MODEL: str = os.getenv("MEMORY_EXTRACT_MODEL", "")
     MEMORY_COMPRESS_MODEL: str = os.getenv("MEMORY_COMPRESS_MODEL", "")
 
+    # ================ Memory v2：更新流水线（新增） =================
+    # 对应 docs/raster-agent长期记忆重构设计.md §10 推荐配置；相似度自动冲突判定
+    # （旧 MEMORY_DUPLICATE_SCORE_THRESHOLD/MEMORY_CONFLICT_SCORE_THRESHOLD）已随
+    # MemoryExtractor._detect_conflict() 一起删除，冲突/去重改为确定性文本精确匹配
+    # + LLM 显式 supersede，不再需要相似度阈值。
+    MEMORY_UPDATE_DEBOUNCE_SECONDS: int = int(os.getenv("MEMORY_UPDATE_DEBOUNCE_SECONDS", "30"))
+    MEMORY_UPDATE_WORKER_CONCURRENCY: int = int(os.getenv("MEMORY_UPDATE_WORKER_CONCURRENCY", "4"))
+    MEMORY_UPDATE_MAX_ATTEMPTS: int = int(os.getenv("MEMORY_UPDATE_MAX_ATTEMPTS", "5"))
+    MEMORY_UPDATE_RETRY_BACKOFF_SECONDS: str = os.getenv(
+        "MEMORY_UPDATE_RETRY_BACKOFF_SECONDS", "30,120,600,1800"
+    )
+    MEMORY_UPDATE_MAX_EVENTS_PER_JOB: int = int(os.getenv("MEMORY_UPDATE_MAX_EVENTS_PER_JOB", "20"))
+    MEMORY_UPDATE_MAX_CONVERSATION_CHARS: int = int(
+        os.getenv("MEMORY_UPDATE_MAX_CONVERSATION_CHARS", "12000")
+    )
+    MEMORY_UPDATE_LEASE_SECONDS: int = int(os.getenv("MEMORY_UPDATE_LEASE_SECONDS", "120"))
+    MEMORY_UPDATE_POLL_INTERVAL_SECONDS: float = float(
+        os.getenv("MEMORY_UPDATE_POLL_INTERVAL_SECONDS", "5")
+    )
+    MEMORY_UPDATE_CANDIDATE_FACTS: int = int(os.getenv("MEMORY_UPDATE_CANDIDATE_FACTS", "15"))
+    MEMORY_MAX_ACTIVE_FACTS_PER_SCOPE: int = int(os.getenv("MEMORY_MAX_ACTIVE_FACTS_PER_SCOPE", "100"))
+    # Fact confidence 分档（设计文档 §6.4）：< discard 丢弃；[discard, active) 进 pending；>= active 直接 active。
+    MEMORY_FACT_DISCARD_CONFIDENCE: float = float(os.getenv("MEMORY_FACT_DISCARD_CONFIDENCE", "0.70"))
+    MEMORY_FACT_ACTIVE_CONFIDENCE: float = float(os.getenv("MEMORY_FACT_ACTIVE_CONFIDENCE", "0.85"))
+    MEMORY_OUTBOX_POLL_INTERVAL_SECONDS: float = float(
+        os.getenv("MEMORY_OUTBOX_POLL_INTERVAL_SECONDS", "3")
+    )
+    MEMORY_OUTBOX_BATCH_SIZE: int = int(os.getenv("MEMORY_OUTBOX_BATCH_SIZE", "20"))
+    MEMORY_OUTBOX_MAX_ATTEMPTS: int = int(os.getenv("MEMORY_OUTBOX_MAX_ATTEMPTS", "10"))
+    # 单个 MemoryDelta 的最大操作数/文本长度上限（validate_delta() 的安全边界，
+    # 设计文档 §7.4 第 4 步），跟"任务合并多少个事件"/"候选 Fact 取多少条"
+    # 是两个不同维度的限额，不复用同一个配置项。
+    MEMORY_DELTA_MAX_PROFILE_PATCHES: int = int(os.getenv("MEMORY_DELTA_MAX_PROFILE_PATCHES", "6"))
+    MEMORY_DELTA_MAX_FACT_OPERATIONS: int = int(os.getenv("MEMORY_DELTA_MAX_FACT_OPERATIONS", "10"))
+    MEMORY_DELTA_MAX_TEXT_LENGTH: int = int(os.getenv("MEMORY_DELTA_MAX_TEXT_LENGTH", "4000"))
+
     # ================ 记忆功能开关 ================================
     MEMORY_ENABLED: bool = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
-    MEMORY_AUTO_EXTRACT_ENABLED: bool = os.getenv("MEMORY_AUTO_EXTRACT_ENABLED", "true").lower() == "true"
+    # Memory v2：Profile（L1/L2）与 Facts（L3）已合并为同一个 MemoryDelta 更新流水线
+    # （MemoryCaptureMiddleware → memory_update_job → MemoryUpdateWorker），不再是两次
+    # 独立 LLM 调用，因此只保留一个开关（原 MEMORY_AUTO_EXTRACT_ENABLED /
+    # MEMORY_PROFILE_UPDATE_ENABLED 已合并）。
+    MEMORY_AUTO_UPDATE_ENABLED: bool = os.getenv("MEMORY_AUTO_UPDATE_ENABLED", "true").lower() == "true"
     MEMORY_INJECTION_ENABLED: bool = os.getenv("MEMORY_INJECTION_ENABLED", "true").lower() == "true"
     MEMORY_TOOL_ENABLED: bool = os.getenv("MEMORY_TOOL_ENABLED", "true").lower() == "true"
     MEMORY_SENSITIVE_FILTER_ENABLED: bool = os.getenv("MEMORY_SENSITIVE_FILTER_ENABLED", "true").lower() == "true"
-    # 用户画像/时间线（L1/L2）实时更新开关，跟 Facts 提取（L3，
-    # MEMORY_AUTO_EXTRACT_ENABLED）各自独立的 LLM 调用，可单独关闭控制成本。
-    MEMORY_PROFILE_UPDATE_ENABLED: bool = os.getenv("MEMORY_PROFILE_UPDATE_ENABLED", "true").lower() == "true"
 
     # ================ Skill 机制 ================================
     SKILLS_DIRS: str = os.getenv("SKILLS_DIRS", "skills/core,skills/public")
@@ -143,6 +176,9 @@ class SystemConfiguration(BaseSettings):
     SANDBOX_COMMAND_TIMEOUT_SECONDS: int = int(os.getenv("SANDBOX_COMMAND_TIMEOUT_SECONDS", "60"))
     SANDBOX_MAX_OUTPUT_BYTES: int = int(os.getenv("SANDBOX_MAX_OUTPUT_BYTES", str(2 * 1024 * 1024)))
     SANDBOX_MAX_MEMORY_MB: int = int(os.getenv("SANDBOX_MAX_MEMORY_MB", "512"))
+    SANDBOX_MAX_CPUS: float = float(os.getenv("SANDBOX_MAX_CPUS", "1.0"))
+    SANDBOX_MAX_PIDS: int = int(os.getenv("SANDBOX_MAX_PIDS", "64"))
+    SANDBOX_TMPFS_SIZE_MB: int = int(os.getenv("SANDBOX_TMPFS_SIZE_MB", "64"))
     # run_python/run_command 的 stdout/stderr 超过这个行数时，不再把完整内容塞进
     # 模型上下文——只给一份头尾预览，完整内容落盘到会话 workspace 里，模型需要时
     # 自己用 read_file 读取（用磁盘 IO 换 token/上下文压力）。
@@ -151,6 +187,12 @@ class SystemConfiguration(BaseSettings):
     # 需要换成自带 node 的镜像；PROJECT_ROOT 用于技能脚本绝对路径在容器内的翻译，
     # 默认取本文件所在项目的根目录，一般不需要覆盖。
     DOCKER_SANDBOX_IMAGE: str = os.getenv("DOCKER_SANDBOX_IMAGE", "python:3.11-slim")
+    # Linux 默认使用宿主服务进程的 uid/gid，使非 root 容器仍能读写 bind mount；
+    # Windows Docker Desktop 无 getuid/getgid，使用 nobody。部署可显式覆盖。
+    DOCKER_SANDBOX_USER: str = os.getenv(
+        "DOCKER_SANDBOX_USER",
+        f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "65534:65534",
+    )
     PROJECT_ROOT: str = os.getenv("PROJECT_ROOT", str(Path(__file__).resolve().parents[2]))
 
     # ================ 后台维护任务（新增） =========================
@@ -187,6 +229,21 @@ class SystemConfiguration(BaseSettings):
     # ================ Redis（Eval 遥测，新增） =====================
     # 留空即禁用 Eval 遥测（emitter/middleware 内部静默降级，不影响主流程）。
     REDIS_URL: str = os.getenv("REDIS_URL", "")
+
+    # ================ MCP（工具注册中心 MCPToolProvider，新增） =====
+    # JSON 数组字符串，每项形如
+    #   {"id": "github", "transport": "stdio", "command": "npx", "args": [...]}
+    #   {"id": "search",  "transport": "streamable_http", "url": "https://..."}
+    # 只能通过部署配置设置，不接受运行时/前端请求动态添加（见工具注册中心
+    # 设计文档 4.4 节安全边界）。默认空数组时 MCPToolProvider 是纯空操作，
+    # 不影响其余三类工具来源。
+    MCP_SERVERS: str = os.getenv("MCP_SERVERS", "[]")
+    # 轮询间隔：`langchain-mcp-adapters` 的 MultiServerMCPClient.get_tools()
+    # 每次调用都现开一个新 session（stdio 场景等于现拉起一个子进程），因此
+    # 这个值不宜设得太短，默认对齐一般配置类信息的新鲜度要求即可。
+    MCP_POLL_INTERVAL_SECONDS: int = int(os.getenv("MCP_POLL_INTERVAL_SECONDS", "60"))
+    # Server 不可达时的指数退避重试上限（秒）。
+    MCP_RECONNECT_BACKOFF_MAX_SECONDS: int = int(os.getenv("MCP_RECONNECT_BACKOFF_MAX_SECONDS", "60"))
 
 
 @lru_cache(maxsize=1)

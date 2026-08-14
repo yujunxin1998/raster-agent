@@ -1,15 +1,10 @@
-"""长期记忆注入中间件（设计文档 4.2 节 #3）。
+"""长期记忆注入中间件（Memory v2，设计文档 §8）。
 
-对应原 `chat_service.py::_build_memory_context_message` 的手写胶水代码：
-检索长期记忆，构造临时的提示词内容注入本轮模型调用，不写入持久化历史
-（沿用现有做法——`request.system_prompt` 只对本次 `handler(request)` 生效，
-不会被 checkpoint 持久化，天然满足"不落库"这个约束）。
-
-三层记忆架构下这里注入两块内容，顺序固定"画像在前、细节在后"：
-1. 用户画像 + 时间线（L1/L2，`get_profile_context`）—— 无条件注入，不依赖
-   当前这句话问了什么，代表"这个用户是谁、最近在做什么"的稳定背景。
-2. 相关 Facts（L3，`get_relevant_context`）—— 按当前问题做语义检索，只有
-   检索到相关内容才注入，是原来就有的逻辑，未改动。
+跟旧版本最大的区别：Profile（L1/L2）与相关 Facts（L3）不再是两条独立预算、
+各自查询的链路，而是交给统一的 `MemoryContextBuilder` 合并渲染进同一个
+`MEMORY_MAX_CONTEXT_TOKENS` 预算；同一次 Agent Run 内可能有多次模型调用
+（工具循环），借助 `AgentRuntimeContext.memory_cache` 只在第一次调用时真正
+查询一次，后续复用（§8.2）。
 """
 from __future__ import annotations
 
@@ -18,24 +13,25 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage
 
-from src.agent_core.memory.memory_manager import MemoryManager
+from src.agent_core.memory.memory_context_builder import MemoryContextBuilder
 from src.agent_core.middlewares.context import AgentRuntimeContext
+from src.config.settings import get_settings
 
 
 class MemoryInjectionMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
-    """在模型调用前检索相关长期记忆，拼进本次调用的 system_prompt。"""
+    """在模型调用前构建长期记忆上下文，拼进本次调用的 system_prompt。"""
 
-    def __init__(self, memory_manager: MemoryManager) -> None:
+    def __init__(self, context_builder: MemoryContextBuilder) -> None:
         """初始化中间件。
 
         Args:
-            memory_manager: 记忆机制门面，通常传入 `get_memory_manager()` 单例。
+            context_builder: 统一的记忆上下文构建器。
         """
         super().__init__()
-        self._memory_manager = memory_manager
+        self._context_builder = context_builder
 
     async def awrap_model_call(self, request: ModelRequest, handler) -> ModelResponse:
-        """检索长期记忆并注入本次模型调用的 system_prompt。
+        """构建长期记忆上下文并注入本次模型调用的 system_prompt。
 
         Args:
             request: 本次模型调用请求。
@@ -45,25 +41,17 @@ class MemoryInjectionMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
             模型调用结果。
         """
         context = request.runtime.context
-        query = self._last_human_text(request.messages)
+        settings = get_settings()
 
-        if context is not None and context.user_id:
-            blocks = []
-
-            profile_context = await self._memory_manager.get_profile_context(user_id=context.user_id)
-            if profile_context:
-                blocks.append(profile_context)
-
-            if query:
-                memory_context = await self._memory_manager.get_relevant_context(
-                    query=query, user_id=context.user_id, conversation_id=context.conversation_id,
+        if context is not None and context.user_id and settings.MEMORY_ENABLED and settings.MEMORY_INJECTION_ENABLED:
+            query = self._last_human_text(request.messages)
+            memory_context = await self._context_builder.build(
+                user_id=context.user_id, query=query, cache=context.memory_cache,
+            )
+            if memory_context:
+                merged_prompt = (
+                    f"{request.system_prompt}\n\n{memory_context}" if request.system_prompt else memory_context
                 )
-                if memory_context:
-                    blocks.append(memory_context)
-
-            if blocks:
-                combined = "\n\n".join(blocks)
-                merged_prompt = f"{request.system_prompt}\n\n{combined}" if request.system_prompt else combined
                 request = request.override(system_prompt=merged_prompt)
 
         return await handler(request)
