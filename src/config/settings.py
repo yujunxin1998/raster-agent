@@ -154,6 +154,17 @@ class SystemConfiguration(BaseSettings):
     SKILL_SCRIPT_MAX_OUTPUT_BYTES: int = int(os.getenv("SKILL_SCRIPT_MAX_OUTPUT_BYTES", str(2 * 1024 * 1024)))
     SKILL_SCRIPT_MAX_MEMORY_MB: int = int(os.getenv("SKILL_SCRIPT_MAX_MEMORY_MB", "512"))
 
+    # ================ Subagent 委派（task() 工具，新增） ============
+    # `task(subagent_type, task)` 分发给 `sub_agent_factory.py::run_subagent()`
+    # 现造的子 Agent 没有原生并发上限——鼓励模型按独立对象并行拆分调用（见
+    # `subagent_system.md`"并行拆分原则"）之后，理论上一轮响应可以发起任意多个
+    # 并行 task 调用，用这两个值兜底：`SUBAGENT_MAX_CONCURRENCY` 限制同时执行的
+    # 子 Agent 数量（`build_task_tool()` 内部用 `asyncio.Semaphore` 实现，作用域
+    # 是单次 Lead Agent 构建/单轮对话，不会跨会话互相排队）；
+    # `SUBAGENT_TIMEOUT_SECONDS` 给单个子 Agent 执行加超时，避免无限挂起。
+    SUBAGENT_MAX_CONCURRENCY: int = int(os.getenv("SUBAGENT_MAX_CONCURRENCY", "3"))
+    SUBAGENT_TIMEOUT_SECONDS: int = int(os.getenv("SUBAGENT_TIMEOUT_SECONDS", "9000"))
+
     # ================ Workspace（虚拟文件系统，新增） =============
     # 每个 conversation_id 对应一个隔离目录 {WORKSPACE_ROOT}/users/{user_id}/threads/{conversation_id}/，
     # 详见 src/agent_core/workspace。

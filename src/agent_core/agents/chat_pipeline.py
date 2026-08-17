@@ -337,7 +337,7 @@ async def run_chat_turn(
     }
     context = AgentRuntimeContext(
         conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
-        registry_revision=registry_revision, secrets={},
+        registry_revision=registry_revision,
     )
 
     message_with_attachments = await _build_message_with_attachments(conversation_id, user_id, message, file_ids)
@@ -398,7 +398,7 @@ async def run_regenerate_turn(
     }
     context = AgentRuntimeContext(
         conversation_id=conversation_id, user_id=user_id, thinking=thinking, datasource_id=datasource_id,
-        registry_revision=registry_revision, secrets={},
+        registry_revision=registry_revision,
     )
 
     state = await agent.aget_state(config)

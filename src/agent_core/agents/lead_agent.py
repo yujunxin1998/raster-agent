@@ -45,6 +45,8 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from src.agent_core.agents.datasource_routing_middleware import DatasourceRoutingMiddleware
+from src.agent_core.agents.middleware_order import validate_middleware_order
+from src.agent_core.agents.plan_middleware import PlanContextMiddleware
 from src.agent_core.agents.skill_middleware import SkillMiddleware
 from src.agent_core.agents.streaming_model_middleware import StreamingModelMiddleware
 from src.agent_core.agents.subagent_profiles import list_subagent_types
@@ -146,7 +148,7 @@ async def build_lead_agent(
         skill_manager.registry.by_category(category) for category in LEAD_AGENT_SKILL_CATEGORIES
     )
 
-    middlewares = [
+    middlewares: list = [
         *build_middlewares(
             guardrail_provider=get_guardrail_provider(),
             sandbox_provider=get_sandbox_provider(),
@@ -164,20 +166,21 @@ async def build_lead_agent(
             ),
             on_title_generated=_persist_title,
         ),
-        # Lead Agent 专属业务规则，不是通用中间件流水线的一部分，追加在最后。
+        # 以下 4 个是 Lead Agent 专属业务规则，不进入通用流水线（`loop.py::
+        # build_middlewares()`）——相对顺序的约束和理由统一收在
+        # `middleware_order.py::ORDER_CONSTRAINTS`，下面构建完列表后立即校验，
+        # 顺序错误会当场抛异常，不需要在这里逐条复述。
         DatasourceRoutingMiddleware(),
-        # 必须排在 ToolAudit/ToolErrorHandling/LoopDetection（build_middlewares()
-        # 产出的一部分）之后、StreamingModelMiddleware 之前——见
-        # skill_middleware.py 模块文档的顺序约束说明。
         SkillMiddleware(
             skill_manager,
             get_guardrail_provider(),
             SkillActivationService(skill_manager.registry),
             allowed_categories=frozenset(LEAD_AGENT_SKILL_CATEGORIES),
         ),
-        # 必须是最内层（离真实模型调用最近）：见该模块说明。
+        PlanContextMiddleware(),
         StreamingModelMiddleware(),
     ]
+    validate_middleware_order(middlewares)
 
     agent = create_agent(
         model=create_chat_model(thinking_enabled=thinking_enabled),

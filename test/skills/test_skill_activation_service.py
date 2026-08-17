@@ -7,7 +7,7 @@ import pytest
 
 from src.agent_core.skills.skill_activation_service import SkillActivationService
 from src.agent_core.skills.skill_loader import SkillLoader
-from src.common.exceptions import SkillDefinitionInvalidError, SkillNotFoundError
+from src.common.exceptions import SkillNotFoundError
 
 
 def _skills_public_root(tmp_path: Path) -> Path:
@@ -77,11 +77,17 @@ async def test_activate_out_of_scope_category_raises_not_found_not_permission_er
         await service.activate("demo-workflow", allowed_categories=frozenset({"general"}))
 
 
-async def test_activate_tool_kind_skill_raises_definition_invalid(tmp_path: Path) -> None:
+async def test_activate_tool_kind_skill_also_returns_instructions(tmp_path: Path) -> None:
+    """迁移期回归测试（重构文档第 15 节阶段 1）：`SkillKind` 区分已取消，
+    带 `parameters` 的技能（如 `query_database`）现在也能被 `load_skill`
+    正常激活读到指令文本，不再被 `activate()` 拒绝——它们在迁移成独立 Tool
+    之前，指令文本入口和工具调用入口同时可用。
+    """
     public_root = _skills_public_root(tmp_path)
     _write_tool_skill(public_root)
     registry = SkillLoader([public_root]).load()
     service = SkillActivationService(registry)
 
-    with pytest.raises(SkillDefinitionInvalidError):
-        await service.activate("demo-tool", allowed_categories=frozenset({"database"}))
+    result = await service.activate("demo-tool", allowed_categories=frozenset({"database"}))
+
+    assert "正文" in result

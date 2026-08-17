@@ -11,7 +11,12 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from src.agent_core.skills.skill_definition import RequiredSecret, SkillDefinition
+from src.agent_core.skills.skill_definition import (
+    _DEFAULT_ACTIVATION_MODE,
+    _VALID_ACTIVATION_MODES,
+    SkillActivationMode,
+    SkillDefinition,
+)
 from src.agent_core.skills.skill_registry import SkillRegistry
 from src.common.constants import SkillCategory
 from src.common.exceptions import SkillDefinitionInvalidError
@@ -19,6 +24,10 @@ from src.common.exceptions import SkillDefinitionInvalidError
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _VALID_CATEGORIES = {category.value for category in SkillCategory}
 _FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+#: 已删除字段（重构文档第 6、15 节，`SkillDefinition` 不再有对应字段）。
+#: 出现时只记 warning，不影响加载——给还没更新 frontmatter 的 SKILL.md 一个
+#: 软过渡，不因为写了废弃字段就直接加载失败。
+_DEPRECATED_FRONTMATTER_KEYS = ("tool_name", "parameters", "runtime_context_keys", "required_secrets")
 
 
 class SkillLoader:
@@ -55,7 +64,7 @@ class SkillLoader:
                     frontmatter = self._parse_frontmatter(skill_md)
                     skill = self._build_definition(skill_dir, frontmatter)
                     registry.register(skill)
-                    logger.debug(f"[SkillLoader] 已加载: {skill.tool_name} <- {skill_md}")
+                    logger.debug(f"[SkillLoader] 已加载: {skill.name} <- {skill_md}")
                 except Exception as exc:
                     logger.error(f"[SkillLoader] 加载失败: {skill_md} - {exc}")
 
@@ -94,8 +103,14 @@ class SkillLoader:
         Returns:
             组装好的 SkillDefinition。
         """
+        for deprecated_key in _DEPRECATED_FRONTMATTER_KEYS:
+            if deprecated_key in frontmatter:
+                logger.warning(
+                    f"[SkillLoader] {skill_dir.name} 的 frontmatter 包含已废弃字段 "
+                    f"{deprecated_key!r}，已忽略（SkillDefinition 不再有对应字段）"
+                )
+
         name = str(frontmatter.get("name") or skill_dir.name)
-        tool_name = str(frontmatter.get("tool_name") or name)
         description = str(frontmatter.get("description") or "").strip()
 
         raw_category = str(frontmatter.get("category") or SkillCategory.default().value)
@@ -107,45 +122,53 @@ class SkillLoader:
             raw_category = SkillCategory.default().value
         category = SkillCategory(raw_category)
 
-        parameters = frontmatter.get("parameters") or []
-        runtime_context_keys = frontmatter.get("runtime_context_keys") or []
-        required_secrets = self._parse_required_secrets(skill_dir, frontmatter.get("required_secrets") or [])
+        activation = self._parse_activation(skill_dir, frontmatter.get("activation"))
+        version = frontmatter.get("version")
+        version = str(version) if version is not None else None
+        tags = tuple(str(tag) for tag in (frontmatter.get("tags") or []))
+        allowed_agents = tuple(str(agent) for agent in (frontmatter.get("allowed_agents") or []))
+        required_tools = tuple(str(tool) for tool in (frontmatter.get("required_tools") or []))
 
         return SkillDefinition(
             name=name,
-            tool_name=tool_name,
             description=description,
             category=category,
             skill_dir=skill_dir,
-            parameters=parameters,
-            runtime_context_keys=runtime_context_keys,
-            required_secrets=required_secrets,
+            activation=activation,
+            version=version,
+            tags=tags,
+            allowed_agents=allowed_agents,
+            required_tools=required_tools,
         )
 
-    def _parse_required_secrets(self, skill_dir: Path, raw_entries: list) -> list[RequiredSecret]:
-        """解析 frontmatter 里可选的 `required_secrets` 列表。
-
-        单个条目格式不合法（不是字典或缺少 name）不会中断整体加载，只记
-        warning 并跳过该条目——与本类其余解析逻辑一致的容错风格。
+    def _parse_activation(self, skill_dir: Path, raw_activation: object) -> SkillActivationMode:
+        """解析 frontmatter 里可选的 `activation.mode`（重构文档 7.3 节）。
 
         Args:
             skill_dir: 技能所在目录，仅用于日志定位。
-            raw_entries: frontmatter 里 `required_secrets` 的原始值。
+            raw_activation: frontmatter 里 `activation` 键的原始值，预期形如
+                `{"mode": "automatic"}`；缺失、非字典或 `mode` 不合法时都
+                回退为默认值，只记 warning，不中断加载。
 
         Returns:
-            解析后的 RequiredSecret 列表。
+            合法的 `SkillActivationMode`。
         """
-        secrets: list[RequiredSecret] = []
-        for entry in raw_entries:
-            if not isinstance(entry, dict):
-                logger.warning(f"[SkillLoader] {skill_dir.name} 的 required_secrets 条目不是字典，已跳过: {entry!r}")
-                continue
-            name = str(entry.get("name") or "").strip()
-            if not name:
-                logger.warning(f"[SkillLoader] {skill_dir.name} 的 required_secrets 条目缺少 name，已跳过: {entry!r}")
-                continue
-            secrets.append(RequiredSecret(name=name, optional=bool(entry.get("optional", True))))
-        return secrets
+        if raw_activation is None:
+            return _DEFAULT_ACTIVATION_MODE
+        if not isinstance(raw_activation, dict):
+            logger.warning(f"[SkillLoader] {skill_dir.name} 的 activation 不是字典，已忽略: {raw_activation!r}")
+            return _DEFAULT_ACTIVATION_MODE
+
+        mode = str(raw_activation.get("mode") or "").strip()
+        if not mode:
+            return _DEFAULT_ACTIVATION_MODE
+        if mode not in _VALID_ACTIVATION_MODES:
+            logger.warning(
+                f"[SkillLoader] {skill_dir.name} 的 activation.mode={mode!r} 不合法，"
+                f"回退为 {_DEFAULT_ACTIVATION_MODE!r}"
+            )
+            return _DEFAULT_ACTIVATION_MODE
+        return mode  # type: ignore[return-value]
 
 
 def resolve_skill_dirs(skills_dirs_setting: str) -> list[Path]:

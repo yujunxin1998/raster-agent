@@ -1,4 +1,4 @@
-"""`SkillRegistry.register()` 单元测试：同名 tool_name 显式报错，不静默覆盖。"""
+"""`SkillRegistry.register()` 单元测试：同名 name 显式报错，不静默覆盖。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,11 +12,18 @@ from src.common.constants import SkillCategory
 from src.common.exceptions import DuplicateSkillError
 
 
-def _skill(tool_name: str, source: str = "public") -> SkillDefinition:
+def _skill(name: str, source: str = "public") -> SkillDefinition:
     return SkillDefinition(
-        name=tool_name, tool_name=tool_name, description="", category=SkillCategory.GENERAL,
-        skill_dir=Path(f"skills/{source}/{tool_name}"),
+        name=name, description="", category=SkillCategory.GENERAL,
+        skill_dir=Path(f"skills/{source}/{name}"),
     )
+
+
+def test_default_revision_is_zero() -> None:
+    """`revision` 是普通可变属性，默认 0——版本递增的职责在
+    `SkillHotReloader`（见 test/tools/registry/test_skill_hot_reload.py），
+    `SkillRegistry` 自己不参与递增逻辑。"""
+    assert SkillRegistry().revision == 0
 
 
 def test_register_new_skill_succeeds() -> None:
@@ -24,10 +31,10 @@ def test_register_new_skill_succeeds() -> None:
 
     registry.register(_skill("demo"))
 
-    assert registry.get("demo").tool_name == "demo"
+    assert registry.get("demo").name == "demo"
 
 
-def test_register_duplicate_tool_name_raises() -> None:
+def test_register_duplicate_name_raises() -> None:
     registry = SkillRegistry()
     registry.register(_skill("demo", source="core"))
 

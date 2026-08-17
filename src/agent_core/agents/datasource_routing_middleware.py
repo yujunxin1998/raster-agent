@@ -8,10 +8,14 @@ prompt 里的一段文案约束（`supervisor.md`"强制约束"一节），模�
 这是"软提示（prompt）+ 硬拦截（本中间件）"两层防线里的第二层。
 
 `query_database` 曾经是委派工具 `delegate_to_database_agent`（把整个查询能力包在
-一个子 Agent 里），现在是直接挂在 Lead Agent 工具集上的 `skills/core/
-query-database/` 技能，工具名字面量随之改成技能的 `tool_name`——两边必须完全
-一致，否则这层硬校验会静默失效（模型明明调用了 `query_database`，中间件却因为
-比对的还是旧名字而认为"没调用"，一直重试）。
+一个子 Agent 里），后来短暂是 `skills/core/query-database/` 技能（`tool_name`
+就是这个字面量），现在（`docs/Skill与Tool完全解耦重构设计.md` 第 10.1 节迁移后）
+是 `database_query_tool.py` 里的独立 `@tool` 函数——本模块这里的字面量
+`_DATABASE_DELEGATE_TOOL_NAME` 必须跟那个函数的 `@tool` 名字完全一致，否则这层
+硬校验会静默失效（模型明明调用了 `query_database`，中间件却因为比对的还是旧
+名字而认为"没调用"，一直重试）。指导"什么时候该查、怎么解读结果"的技能正文
+现在挂在同分类下的 `skills/core/database-analysis/` WORKFLOW 技能里，跟这个
+Tool 是名字不同、职责分离的两个东西。
 
 不属于 `agent_core/middlewares/` 里那 11 个通用中间件——这是 Lead Agent 的
 专属业务规则（知道 `query_database` 这个具体工具名），随 `lead_agent.py` 的

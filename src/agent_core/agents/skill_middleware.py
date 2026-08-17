@@ -1,56 +1,72 @@
-"""Lead Agent 专属：动态注入技能目录 + 拦截 `load_skill` 调用做加载与权限校验。
+"""Lead Agent 专属：Skill 发现、预路由、激活与资源读取的唯一运行入口。
 
-对应 `docs/Skill注入与Load-Skill重构设计.md` 第四、五节。不进
-`agent_core/loop.py::build_middlewares()`——`web-researcher` 等 subagent
-（`sub_agent_factory.py::run_subagent()` 现造的子 Agent）不挂任何中间件，本类
-只在 `lead_agent.py` 里随 Lead Agent 专属中间件追加，与 `DatasourceRoutingMiddleware`
-同一挂载方式、同一个不进通用流水线的原因。
+对应 `docs/Skill注入与Load-Skill重构设计.md` 第四、五节的原始落地，以及
+`docs/Skill与Tool完全解耦重构设计.md` 第 7 节的"自动路由为主，load_skill
+为补充"升级。不进 `agent_core/loop.py::build_middlewares()`——`web-researcher`
+等 subagent（`sub_agent_factory.py::run_subagent()` 现造的子 Agent）不挂任何
+中间件，本类只在 `lead_agent.py` 里随 Lead Agent 专属中间件追加，与
+`DatasourceRoutingMiddleware` 同一挂载方式、同一个不进通用流水线的原因。
 
-把 Skill 的"发现"（目录注入）和"激活"（校验+加载正文）都收在这一个中间件里，
-而不是让 `load_skill` 自己的 `StructuredTool.coroutine` 承担业务逻辑——`load_skill`
-在 Lead Agent 场景下只是一个"让模型能够发起这次调用"的 schema 占位，真正的
-校验和加载发生在 `awrap_tool_call` 里，短路返回，永远不会调用到底层
-`handler(request)`（即不会执行 `skill_load_tool.py::create_load_skill_tool`
-里注册的那份 `_invoke`）。这与 `GuardrailMiddleware` 拒绝时"不调用 handler,
-直接返回 error ToolMessage"是完全一致的既有模式。
+**自动路由（重构文档 7.1 节）**：单纯把 Skill Catalog 放进 System Prompt、
+指望模型自己判断"要不要调用 load_skill"是不可靠的——任务已经命中某个技能，
+模型也可能觉得自己能直接搞定而跳过。`awrap_model_call` 现在先跑一遍
+`skill_router.route()`，`forced`（用户/API 显式指定，或技能自己声明
+`activation: required`）的技能在**首次模型调用前**就通过
+`SkillActivationService` 把正文直接注入 system_prompt，不依赖模型主动调用
+`load_skill`；只有 `catalog_candidates`（`activation: automatic` 且未被显式
+指定）才继续走"只给目录、模型按需 load_skill 补充加载"的旧路径。
 
-`skill_load_tool.py` 里的自包含实现仍然保留，是因为 `web-researcher` subagent
-没有任何中间件可以拦截——那条路径上 `load_skill` 只能靠自己的 `_invoke` 独立
-完成权限校验和加载，两边复用同一个 `SkillActivationService`/`GuardrailProvider`
-实例，逻辑只有一份，只是"谁来触发"这一层因为 subagent 的中间件缺位而不同。
+**匹配方式范围收窄**：`skill_router.route()` 只做规则/元数据匹配（显式指定
++ `activation` 声明），不引入 Embedding/LLM 语义匹配——原因见
+`skill_router.py` 模块文档。
 
-挂载顺序约束：必须排在 `build_middlewares()` 产出的
+**重复激活去重**：`PipelineState.activated_skills`（`state.py`）记录本次
+Agent 运行内已经激活过的技能，同名同版本不重复把正文注入
+system_prompt/消息（重构文档 7.4 节）。`awrap_model_call` 通过
+`ExtendedModelResponse(command=Command(update={"activated_skills": ...}))`
+写入这份状态；`awrap_tool_call` 拦截到的补充激活（`load_skill`）通过
+`Command(update={...})` 写入，两处使用同一个 `_merge_activated_skills`
+reducer 合并，互不冲突（并发工具调用场景与 `recent_tool_calls` 同款处理）。
+
+挂载顺序约束（完整列表 + 校验代码见 `middleware_order.py::ORDER_CONSTRAINTS`/
+`validate_middleware_order()`，这里不重复展开）：必须排在
 `ToolAuditMiddleware`/`ToolErrorHandlingMiddleware`/`LoopDetectionMiddleware`
-之后（列表里越靠后越贴近实际执行——见 `loop.py` 的顺序说明），这样
-`load_skill` 调用依然会被审计日志、异常兜底、死循环检测覆盖，本类只是
-这条链路里最内层、真正做"要不要把技能正文喂给模型"这个决策的一层；同时
-必须排在 `StreamingModelMiddleware` 之前（后者必须是模型调用链路的最内层，
-见其模块文档），顺序为
-`[*build_middlewares(...), DatasourceRoutingMiddleware(), SkillMiddleware(...), StreamingModelMiddleware()]`。
+之后，这样 `load_skill` 调用依然会被审计日志、异常兜底、死循环检测覆盖；
+同时必须排在 `StreamingModelMiddleware` 之前（后者必须是模型调用链路的最内层）。
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain.agents.middleware import ModelRequest, ModelResponse
+from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
+from loguru import logger
 
 from src.agent_core.guardrail.guardrail_provider import GuardrailContext, GuardrailProvider
 from src.agent_core.middlewares.context import AgentRuntimeContext
+from src.agent_core.middlewares.state import PipelineState
 from src.agent_core.skills.skill_activation_service import SkillActivationService
 from src.agent_core.skills.skill_catalog import build_skill_catalog
-from src.agent_core.skills.skill_definition import SkillDefinition, SkillKind
-from src.agent_core.skills.skill_load_tool import LOAD_SKILL_TOOL_NAME
+from src.agent_core.skills.skill_definition import SkillDefinition
+from src.agent_core.skills.skill_load_tool import LOAD_SKILL_TOOL_NAME, create_load_skill_tool
 from src.agent_core.skills.skill_manager import SkillManager
+from src.agent_core.skills.skill_resource_tool import create_read_skill_resource_tool
+from src.agent_core.skills.skill_router import SkillRoutingDecision, route
 from src.common.exceptions import SkillDefinitionInvalidError, SkillNotFoundError
 
 _SKILL_CATALOG_TAG = "skill_catalog"
+_SKILL_TAG = "skill"
+_ALREADY_ACTIVATED_TEMPLATE = "技能 [{skill_name}] 已在本次对话中激活，以下内容已在你的上下文里，无需重复加载。"
 
 
-class SkillMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
-    """动态注入 WORKFLOW 技能目录，并拦截 `load_skill` 调用完成校验与加载。"""
+class SkillMiddleware(AgentMiddleware[PipelineState, AgentRuntimeContext]):
+    """动态注入技能目录 + 自动预路由激活 + 拦截 `load_skill`/`read_skill_resource`。"""
+
+    state_schema = PipelineState
 
     def __init__(
         self,
@@ -74,43 +90,120 @@ class SkillMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
         self._guardrail_provider = guardrail_provider
         self._activation_service = activation_service
         self._allowed_categories = allowed_categories
+        # 重构文档 7.4 节建议写法：`load_skill`/`read_skill_resource` 的工具
+        # schema 都由中间件自己提供，不再依赖 ToolRegistry 单独注册一条
+        # `skill.load_skill` 定义（`SkillToolProvider` 已删除）。`load_skill`
+        # 复用 `create_load_skill_tool`——它本身自带的 `_invoke` 会被
+        # `awrap_tool_call` 短路，只取它的 schema/工具名，执行逻辑走
+        # 这里的拦截分支，两边用同一个 activation_service/guardrail_provider
+        # 保证行为一致。
+        self.tools = [
+            create_load_skill_tool(activation_service, guardrail_provider, allowed_categories),
+            create_read_skill_resource_tool(skill_manager.registry, allowed_categories),
+        ]
 
-    def _workflow_skills(self) -> list[SkillDefinition]:
-        """现算当前分类范围内的 WORKFLOW 技能，不缓存。"""
+    def _visible_skills(self) -> list[SkillDefinition]:
+        """现算当前分类范围内可见的全部技能，不缓存。"""
         return [
             skill
             for category in self._allowed_categories
             for skill in self._skill_manager.registry.by_category(category)
-            if skill.kind is SkillKind.WORKFLOW
         ]
 
-    async def awrap_model_call(self, request: ModelRequest, handler) -> ModelResponse:
-        """把当前可用的 WORKFLOW 技能目录追加进本次模型调用的 system_prompt。
+    async def _check_permission(self, context: AgentRuntimeContext | None, skill_name: str) -> bool:
+        decision = await self._guardrail_provider.check(
+            user_id=context.user_id if context else None,
+            tool_name=skill_name,
+            tool_args={},
+            context=GuardrailContext(conversation_id=context.conversation_id if context else None),
+        )
+        if not decision.is_allowed:
+            logger.info(f"[SkillMiddleware] skill.activation.denied skill={skill_name} reason={decision.reason}")
+        return decision.is_allowed
+
+    async def awrap_model_call(
+        self, request: ModelRequest, handler
+    ) -> ModelResponse | ExtendedModelResponse:
+        """预路由 + 首次模型调用前强制激活 forced 技能 + 目录注入 catalog_candidates。
 
         Args:
             request: 本次模型调用请求。
             handler: 执行模型调用的回调。
 
         Returns:
-            模型调用结果。
+            带 `activated_skills` 状态更新命令的模型调用结果。
         """
-        catalog = build_skill_catalog(self._workflow_skills())
+        skills = self._visible_skills()
+        if not skills:
+            return await handler(request)
+
+        context = request.runtime.context if request.runtime else None
+        explicit_names = frozenset(context.explicit_skill_names) if context else frozenset()
+        decision = route(skills, explicit_skill_names=explicit_names)
+        already_activated: dict[str, dict] = dict(request.state.get("activated_skills") or {})
+
+        skills_by_name = {skill.name: skill for skill in skills}
+        blocks: list[str] = []
+        newly_activated: dict[str, dict] = {}
+
+        for name in decision.forced:
+            if name in already_activated:
+                continue
+            if not await self._check_permission(context, name):
+                continue
+            skill = skills_by_name[name]
+            try:
+                body = await self._activation_service.activate(name, self._allowed_categories)
+            except (SkillNotFoundError, SkillDefinitionInvalidError) as exc:
+                logger.warning(f"[SkillMiddleware] skill.activation.failed skill={name} error={exc}")
+                continue
+
+            reason = decision.reasons[name]
+            blocks.append(f'<{_SKILL_TAG} name="{name}" source="{reason}">\n{body}\n</{_SKILL_TAG}>')
+            newly_activated[name] = {
+                "skill_version": skill.version,
+                "activation_source": reason,
+                "activated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.info(f"[SkillMiddleware] skill.activation.{reason} skill={name}")
+
+        merged_activated = {**already_activated, **newly_activated}
+        catalog_skills = [
+            skills_by_name[name]
+            for name in decision.catalog_candidates
+            if name not in merged_activated
+        ]
+        catalog = build_skill_catalog(catalog_skills)
+
+        system_prompt = request.system_prompt
+        if blocks:
+            skill_section = "\n\n".join(blocks)
+            system_prompt = f"{system_prompt}\n\n{skill_section}" if system_prompt else skill_section
         if catalog:
             block = f"<{_SKILL_CATALOG_TAG}>\n{catalog}\n</{_SKILL_CATALOG_TAG}>"
-            merged_prompt = f"{request.system_prompt}\n\n{block}" if request.system_prompt else block
-            request = request.override(system_prompt=merged_prompt)
-        return await handler(request)
+            system_prompt = f"{system_prompt}\n\n{block}" if system_prompt else block
+        if system_prompt != request.system_prompt:
+            request = request.override(system_prompt=system_prompt)
+
+        model_response = await handler(request)
+        if not newly_activated:
+            return model_response
+        return ExtendedModelResponse(
+            model_response=model_response,
+            command=Command(update={"activated_skills": newly_activated}),
+        )
 
     async def awrap_tool_call(self, request: ToolCallRequest, handler) -> ToolMessage | Command:
-        """拦截 `load_skill` 调用，短路完成权限校验 + 加载；其余工具调用原样透传。
+        """拦截 `load_skill` 调用，短路完成权限校验 + 补充激活；其余工具调用原样透传。
 
         Args:
             request: 工具调用请求。
             handler: 执行工具调用的回调（非 `load_skill` 调用时原样转交）。
 
         Returns:
-            `load_skill` 调用：携带加载结果或拒绝原因的 `ToolMessage`，不会
-            调用 `handler`；其余调用：`handler(request)` 的原始结果。
+            `load_skill` 调用：携带加载结果或拒绝原因的 `ToolMessage`/更新
+            `activated_skills` 的 `Command`，不会调用 `handler`；其余调用：
+            `handler(request)` 的原始结果。
         """
         tool_call = request.tool_call
         if tool_call["name"] != LOAD_SKILL_TOOL_NAME:
@@ -128,9 +221,27 @@ class SkillMiddleware(AgentMiddleware[Any, AgentRuntimeContext]):
         if not decision.is_allowed:
             return ToolMessage(content=decision.reason, tool_call_id=tool_call["id"], status="error")
 
+        already_activated: dict[str, dict] = dict(request.state.get("activated_skills") or {})
+        if skill_name in already_activated:
+            content = _ALREADY_ACTIVATED_TEMPLATE.format(skill_name=skill_name)
+            return ToolMessage(content=content, tool_call_id=tool_call["id"])
+
         try:
             content = await self._activation_service.activate(skill_name, self._allowed_categories)
         except (SkillNotFoundError, SkillDefinitionInvalidError) as exc:
-            content = str(exc)
+            return ToolMessage(content=str(exc), tool_call_id=tool_call["id"])
 
-        return ToolMessage(content=content, tool_call_id=tool_call["id"])
+        logger.info(f"[SkillMiddleware] skill.activation.supplemental skill={skill_name}")
+        skill = self._skill_manager.registry.get(skill_name)
+        return Command(
+            update={
+                "activated_skills": {
+                    skill_name: {
+                        "skill_version": skill.version,
+                        "activation_source": "load_skill",
+                        "activated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                },
+                "messages": [ToolMessage(content=content, tool_call_id=tool_call["id"])],
+            }
+        )

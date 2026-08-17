@@ -66,14 +66,12 @@ from src.agent_core.memory import (
 from src.agent_core.memory.elasticsearch_memory_store import init_elasticsearch_memory_store
 from src.agent_core.memory.memory_context_builder import init_memory_context_builder
 from src.agent_core.sandbox import (
-    get_sandbox_provider,
     init_docker_sandbox_provider,
     init_local_sandbox_provider,
 )
 from src.agent_core.skills import init_skill_manager, resolve_skill_dirs
 from src.agent_core.tools.registry import (
     BuiltinToolProvider,
-    SkillToolProvider,
     SubagentToolProvider,
     init_mcp_connection_manager,
     init_skill_hot_reloader,
@@ -255,26 +253,22 @@ async def lifespan(app: FastAPI):
         )
     else:  # validate_sandbox_deployment 已拦截，保留防御式分支避免未来绕过。
         raise RuntimeError(f"不支持的 SANDBOX_PROVIDER: {settings.SANDBOX_PROVIDER!r}")
-    sandbox_provider = get_sandbox_provider()
 
     # 5. 权限控制（组合技能开关表 + 工具权限表）
     guardrail_provider = init_guardrail_provider(skill_settings_store, tool_permission_store)
 
-    # 6. Skill 机制：扫描技能目录，装配 SkillToolFactory（依赖 guardrail + sandbox）
-    skill_manager = init_skill_manager(
-        settings.SKILLS_DIRS,
-        enabled=settings.SKILLS_ENABLED,
-        guardrail_provider=guardrail_provider,
-        sandbox_provider=sandbox_provider,
-        skill_script_timeout_seconds=settings.SKILL_SCRIPT_TIMEOUT_SECONDS,
-    )
+    # 6. Skill 机制：扫描技能目录。不再依赖 guardrail/sandbox（重构文档
+    # docs/Skill与Tool完全解耦重构设计.md 第 15 节阶段 6 之后，Skill 不再
+    # 生成独立 StructuredTool，激活权限校验/资源读取都在 SkillMiddleware
+    # 里现取 guardrail_provider，不需要在构造 SkillManager 时预先装配）。
+    skill_manager = init_skill_manager(settings.SKILLS_DIRS, enabled=settings.SKILLS_ENABLED)
 
-    # 6.5 工具注册中心：发布 builtin/skill/subagent 三类进程内 application 级
-    # 来源 + 启动 MCP 轮询（`MCP_SERVERS` 为空数组时是纯空操作，不影响其余
-    # 来源），见 docs/工具注册中心与热重载设计.md。
+    # 6.5 工具注册中心：发布 builtin/subagent 两类进程内 application 级来源
+    # （Skill 不进 ToolRegistry，见 skill_middleware.py 模块文档）+ 启动 MCP
+    # 轮询（`MCP_SERVERS` 为空数组时是纯空操作，不影响其余来源），见
+    # docs/工具注册中心与热重载设计.md。
     tool_registry = init_tool_registry()
     await tool_registry.publish("builtin", BuiltinToolProvider().discover())
-    await tool_registry.publish("skill", SkillToolProvider(skill_manager, guardrail_provider).discover())
     await tool_registry.publish("subagent", SubagentToolProvider().discover())
     await init_mcp_connection_manager(
         tool_registry,
@@ -283,9 +277,7 @@ async def lifespan(app: FastAPI):
         reconnect_backoff_max_seconds=settings.MCP_RECONNECT_BACKOFF_MAX_SECONDS,
     )
     if settings.SKILLS_ENABLED:
-        init_skill_hot_reloader(
-            resolve_skill_dirs(settings.SKILLS_DIRS), skill_manager, tool_registry, guardrail_provider
-        )
+        init_skill_hot_reloader(resolve_skill_dirs(settings.SKILLS_DIRS), skill_manager)
 
     # 7. Memory v2 机制：ES 检索投影 + MemoryManager（压缩/画像只读/敏感过滤）+
     # MemoryContextBuilder（统一注入）+ MemoryUpdateWorker（Delta 更新流水线）+

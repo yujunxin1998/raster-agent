@@ -27,6 +27,6 @@ def build_skill_catalog(skills: list[SkillDefinition]) -> str:
     if not skills:
         return ""
     lines = [_CATALOG_HEADER]
-    for skill in sorted(skills, key=lambda s: s.tool_name):
-        lines.append(f"- {skill.tool_name}: {skill.description}")
+    for skill in sorted(skills, key=lambda s: s.name):
+        lines.append(f"- {skill.name}: {skill.description}")
     return "\n".join(lines)

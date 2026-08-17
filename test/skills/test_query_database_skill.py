@@ -1,8 +1,12 @@
-"""`skills/core/query-database/` 技能能否被 `SkillLoader` 正常加载的冒烟测试。
+"""`skills/core/database-analysis/`、`skills/core/knowledge-base-answering/`
+两个技能能否被 `SkillLoader` 正常加载的冒烟测试。
 
-对应本轮重构：`query_database` 从委派子 Agent 里的 `@tool` 函数改成一个真正的
-`SKILL.md` 技能，`tool_name` 必须保持 `query_database` 不变——这是
-`DatasourceRoutingMiddleware` 硬校验能否对上的关键（见该中间件的说明）。
+对应 `docs/Skill与Tool完全解耦重构设计.md` 第 10 节迁移：`query_database`/
+`search_knowledge_base` 从"参数化技能（经 SkillToolFactory 生成 StructuredTool）"
+迁移成独立业务 Tool（`database_query_tool.py`/`knowledge_search_tool.py`），
+原技能改造为纯指令型 WORKFLOW 技能，改名为 `database-analysis`/
+`knowledge-base-answering`（避免技能名与新 Tool 名冲突），通过 `required_tools`
+声明指向对应 Tool，不再有 `parameters`/脚本入口。
 """
 from __future__ import annotations
 
@@ -14,23 +18,19 @@ from src.common.constants import SkillCategory
 _SKILLS_CORE_DIR = Path(__file__).resolve().parents[2] / "skills" / "core"
 
 
-def test_query_database_skill_loads_with_expected_shape() -> None:
+def test_database_analysis_skill_loads_as_pure_workflow() -> None:
     registry = SkillLoader([_SKILLS_CORE_DIR]).load()
 
-    skill = registry.get("query_database")
+    skill = registry.get("database-analysis")
 
-    assert skill.tool_name == "query_database"
     assert skill.category == SkillCategory.DATABASE
-    assert skill.has_script()
-    assert [p["name"] for p in skill.parameters] == ["query_text"]
-    assert "datasource_id" in skill.runtime_context_keys
+    assert skill.required_tools == ("query_database",)
 
 
-def test_search_knowledge_base_skill_still_loads() -> None:
-    """回归检查：修 rag_service.py 导入路径没有连带弄坏这个技能本身能不能加载。"""
+def test_knowledge_base_answering_skill_loads_as_pure_workflow() -> None:
     registry = SkillLoader([_SKILLS_CORE_DIR]).load()
 
-    skill = registry.get("search_knowledge_base")
+    skill = registry.get("knowledge-base-answering")
 
     assert skill.category == SkillCategory.RAG
-    assert skill.has_script()
+    assert skill.required_tools == ("search_knowledge_base",)

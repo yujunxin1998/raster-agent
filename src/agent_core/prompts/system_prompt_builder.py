@@ -3,9 +3,13 @@
 跟 `templates/`（`PromptFactory`/`PromptRegistry` 管的"提示词模板"，单次调用用，
 按名称整篇 `.get()`/`.render()`）是两种不同的东西：这里管的是 `system/<agent_name>/`
 下按模块拆开的系统提示词片段（`role`/`thinking_style`/`clarification_system`/
-`skill_system`/`subagent_system`/`response_style`），每个模块文件只写标签内部的
-正文，外层 `<module>...</module>` 标签由 `build()` 加，最终拼成一个 Agent 实际
-使用的 `system_prompt` 字符串。
+`skill_system`/`subagent_system`/`plan_system`/`response_style`），每个模块文件
+只写标签内部的正文，外层 `<module>...</module>` 标签由 `build()` 加，最终拼成
+一个 Agent 实际使用的 `system_prompt` 字符串。
+
+`plan_system` 只讲"什么时候该建计划、怎么更新"这类静态规则——当前计划的实时
+内容不在这里，那是 `PlanContextMiddleware` 按 state 动态注入的
+`<current_plan>` 块（见该模块说明），跟本文件的静态拼装是两条独立机制。
 
 每个非 `role` 模块都有一个同名布尔开关，关闭时该模块连标签一起整段跳过（不是
 空标签）——这样模型看到的上下文里不会出现"这个能力不存在"的空壳提示。`role`
@@ -34,6 +38,7 @@ _MODULE_ORDER: tuple[tuple[str, str | None], ...] = (
     ("clarification_system", "clarification_enabled"),
     ("skill_system", "skill_enabled"),
     ("subagent_system", "subagent_enabled"),
+    ("plan_system", "plan_enabled"),
     ("response_style", "response_style_enabled"),
 )
 
@@ -58,6 +63,7 @@ class SystemPromptBuilder:
         clarification_enabled: bool = True,
         skill_enabled: bool = True,
         subagent_enabled: bool = True,
+        plan_enabled: bool = True,
         response_style_enabled: bool = True,
     ) -> str:
         """拼装一个 Agent 的系统提示词。
@@ -68,6 +74,7 @@ class SystemPromptBuilder:
             clarification_enabled: 是否注入 `<clarification_system>` 模块。
             skill_enabled: 是否注入 `<skill_system>` 模块。
             subagent_enabled: 是否注入 `<subagent_system>` 模块。
+            plan_enabled: 是否注入 `<plan_system>` 模块。
             response_style_enabled: 是否注入 `<response_style>` 模块。
 
         Returns:
@@ -79,6 +86,7 @@ class SystemPromptBuilder:
             "clarification_enabled": clarification_enabled,
             "skill_enabled": skill_enabled,
             "subagent_enabled": subagent_enabled,
+            "plan_enabled": plan_enabled,
             "response_style_enabled": response_style_enabled,
         }
 

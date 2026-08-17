@@ -19,7 +19,6 @@ from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.middlewares.state import PipelineState
 
 _DEFAULT_THRESHOLD = 3  # 对应旧 supervisor 死循环判断的"连续 3 次"
-_HISTORY_WINDOW = 10  # 状态里最多保留的历史签名条数，避免无界增长
 
 
 def _tool_call_signature(tool_call: dict) -> str:
@@ -66,6 +65,16 @@ class LoopDetectionMiddleware(AgentMiddleware[PipelineState, AgentRuntimeContext
         Returns:
             达到阈值时返回携带提示的 error `ToolMessage`（打包进 `Command`
             一并更新签名历史）；否则正常执行并更新签名历史。
+
+        Note:
+            返回的 `Command.update["recent_tool_calls"]` 只放本次这一条新签名
+            （`[signature]`），不是"历史 + 本次"拼好的完整列表——同一步内 Lead
+            Agent 可能并行发起多个工具调用，每个都会各自跑一次本方法；如果各自
+            都基于同一份起始 `history` 拼出完整列表再整体写回，多个并行分支的
+            写入会互相冲突（LangGraph 的默认 channel 一步只接受一次写入）。真正
+            的拼接 + 窗口截断交给 `PipelineState` 上声明的 reducer
+            （`state.py::_append_recent_tool_calls`）在合并阶段做，多个并行分支
+            各自提交的单条签名可以安全叠加。
         """
         tool_call = request.tool_call
         signature = _tool_call_signature(tool_call)
@@ -82,14 +91,13 @@ class LoopDetectionMiddleware(AgentMiddleware[PipelineState, AgentRuntimeContext
                 tool_call_id=tool_call["id"],
                 status="error",
             )
-            return Command(update={"messages": [message], "recent_tool_calls": (history + [signature])[-_HISTORY_WINDOW:]})
+            return Command(update={"messages": [message], "recent_tool_calls": [signature]})
 
         result = await handler(request)
-        updated_history = (history + [signature])[-_HISTORY_WINDOW:]
 
         if isinstance(result, Command):
             update: dict[str, Any] = dict(result.update or {})
-            update["recent_tool_calls"] = updated_history
+            update["recent_tool_calls"] = [signature]
             return Command(graph=result.graph, update=update, resume=result.resume, goto=result.goto)
 
-        return Command(update={"messages": [result], "recent_tool_calls": updated_history})
+        return Command(update={"messages": [result], "recent_tool_calls": [signature]})

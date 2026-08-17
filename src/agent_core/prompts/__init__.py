@@ -8,11 +8,12 @@
 2. **系统提示词模块**（`system/<agent_name>/*.md`）—— 驱动一个带工具循环的
    Agent 的 `system_prompt`（目前只有 `system/lead_agent/`），按
    `role`/`thinking_style`/`clarification_system`/`skill_system`/
-   `subagent_system`/`response_style` 六个模块拆开，每个模块文件只写标签内部
-   的正文，走 `agent_core.prompts.system_prompt_builder.system_prompt_builder`
-   按开关条件拼装（`role` 永远注入，其余 5 个各有一个同名布尔开关，关闭时
-   连标签一起整段跳过）。**新增 Agent 的系统提示词不要往 `templates/` 里加
-   扁平 `.md`**，应在 `system/` 下新建同名子目录、按六个模块拆分。
+   `subagent_system`/`plan_system`/`response_style` 七个模块拆开，每个模块
+   文件只写标签内部的正文，走
+   `agent_core.prompts.system_prompt_builder.system_prompt_builder` 按开关
+   条件拼装（`role` 永远注入，其余 6 个各有一个同名布尔开关，关闭时连标签
+   一起整段跳过）。**新增 Agent 的系统提示词不要往 `templates/` 里加扁平
+   `.md`**，应在 `system/` 下新建同名子目录、按模块拆分。
 
 `PromptFactory` 管的模板本身不依赖数据库/沙箱/权限等基础设施，加载不需要等待
 其它模块初始化，因此沿用"模块导入时即加载完毕"的做法，在此直接构造进程内唯一的

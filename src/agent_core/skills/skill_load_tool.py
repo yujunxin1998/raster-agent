@@ -11,8 +11,15 @@ Lead Agent 场景下，`agent_core.agents.skill_middleware.SkillMiddleware` 会�
 `_invoke` 实际上是"给没有 SkillMiddleware 保护的调用方（subagent）用的
 兜底实现"，不是重复造轮子——两处复用同一个 `SkillActivationService`/
 `GuardrailProvider`，逻辑只有一份，只是"谁来触发"这一层不同。
+
+不能加 `from __future__ import annotations`：`langchain_core.tools.structured.
+StructuredTool._injected_args_keys` 用 `inspect.signature(fn)`（不带
+`eval_str=True`）判断哪些参数需要注入，postponed evaluation 会让
+`runtime: ToolRuntime[...]` 的标注在这里只是个没被求值的字符串，
+`_is_injected_arg_type` 认不出来，`_parse_input` 就会把模型正确注入的
+`runtime` 参数当成未声明字段丢弃（`@tool` 装饰器不受影响，因为它内部会
+重建一份带真实类型的 `__signature__`）。
 """
-from __future__ import annotations
 
 from langgraph.prebuilt import ToolRuntime
 from langchain_core.tools import StructuredTool

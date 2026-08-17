@@ -66,9 +66,18 @@ _PROMPT_TEMPLATE = """你在维护一个用户的长期记忆（画像 + 离散�
 3. 纯闲聊、问候、临时性问题不产生任何 patch/operation，两个数组都可以为空。
 4. confidence 范围 0~1，只有你确信的信息才给高分。
 
-只输出 JSON，不要有任何其他文字：
+只输出 JSON，不要有任何其他文字。profile_patches/fact_operations 数组里的每个元素
+都是一个扁平对象，操作类型放在 op 字段里，不要把 op 的取值当成外层 key 再把其余
+字段嵌套进去（错误示例：{{"add": {{"content": "..."}}}}；正确示例见下）：
 {{"schema_version": 1, "source_event_ids": {source_event_ids},
-  "profile_patches": [...], "fact_operations": [...]}}"""
+  "profile_patches": [
+    {{"field": "work_context", "op": "set", "value": "...", "confidence": 0.9, "evidence_message_ids": ["..."]}}
+  ],
+  "fact_operations": [
+    {{"op": "add", "content": "...", "category": "preference", "confidence": 0.9, "evidence_message_ids": ["..."]}},
+    {{"op": "update", "target_fact_id": "...", "content": "...", "evidence_message_ids": ["..."]}}
+  ]}}
+没有变更时两个数组给空列表 []，不要省略 op 字段，也不要输出示例之外的操作类型。"""
 
 
 def _strip_json_fence(raw: str) -> str:
@@ -250,7 +259,7 @@ class MemoryUpdateWorker:
             for message in conversation
         )
         source_event_ids = json.dumps(
-            sorted({job["first_event_id"], job["last_event_id"]}), ensure_ascii=False,
+            sorted({str(job["first_event_id"]), str(job["last_event_id"])}), ensure_ascii=False,
         )
         return _PROMPT_TEMPLATE.format(
             revision=profile_snapshot.get("revision", 0), profile_lines=profile_lines,

@@ -36,14 +36,20 @@ def _get_skill_or_404(tool_name: str) -> SkillDefinition:
 
 
 def _to_skill_info(skill: SkillDefinition, enabled: bool) -> SkillInfo:
-    """把 SkillDefinition 转换为对外展示的 SkillInfo。"""
+    """把 SkillDefinition 转换为对外展示的 SkillInfo。
+
+    `parameters`/`has_script` 是重构前的响应字段（`docs/Skill与Tool完全解耦
+    重构设计.md` 非目标一节明确不改变对外协议，保留字段但恒为空/False）——
+    Skill 不再生成参数化工具、也不再自动执行脚本，见 `skill_definition.py`
+    模块文档。
+    """
     return SkillInfo(
         tool_name=skill.tool_name,
         name=skill.name,
         description=skill.description,
         category=skill.category.value,
-        parameters=skill.parameters,
-        has_script=skill.has_script(),
+        parameters=[],
+        has_script=False,
         enabled=enabled,
     )
 
@@ -76,9 +82,9 @@ async def get_skill_detail(tool_name: str, user_id: str) -> ApiResponse:
 
 def _read_instructions(skill: SkillDefinition) -> str:
     """读取技能 SKILL.md 正文，抽成独立函数便于测试时打桩。"""
-    from src.agent_core.skills.skill_content_reader import SkillContentReader
+    from src.agent_core.skills.skill_content_repository import SkillContentRepository
 
-    return SkillContentReader(skill).read_instructions()
+    return SkillContentRepository(skill).read_instructions()
 
 
 @router.get(

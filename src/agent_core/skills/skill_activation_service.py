@@ -1,22 +1,26 @@
-"""把一个 `WORKFLOW` 形态技能名解析为可以直接喂给模型的指令文本。
+"""把一个技能名解析为可以直接喂给模型的指令文本。
 
-对应 `docs/Skill注入与Load-Skill重构设计.md` 第四节：只处理 `SkillKind.WORKFLOW`
-技能——`TOOL` 形态技能（`search_knowledge_base`/`query_database`）继续走
-`SkillToolFactory`，不经过这里，`activate()` 会主动拒绝按 `TOOL` 技能名调用。
+**迁移状态**（对应 `docs/Skill与Tool完全解耦重构设计.md` 第 15 节阶段 1）：
+原来只处理 `SkillKind.WORKFLOW` 技能、显式拒绝 `TOOL` 形态技能
+（`search_knowledge_base`/`query_database`）的限制已经取消——`SkillKind` 是
+待删除的过时区分（见 `skill_definition.py` 模块文档"迁移状态"），激活逻辑
+现在对任意技能一视同仁，都是"读正文 + 参考资料 + 路径替换"。这两个技能在
+未完成 Tool 化迁移（重构文档第 15 节阶段 3）之前仍然*同时*可以被
+`load_skill` 读到指令文本、也可以被直接当工具调用——不冲突，只是过渡期内
+的一个技能有两个入口。
 """
 from __future__ import annotations
 
-from src.agent_core.skills.skill_content_reader import SkillContentReader
-from src.agent_core.skills.skill_definition import SkillKind
+from src.agent_core.skills.skill_content_repository import SkillContentRepository
 from src.agent_core.skills.skill_path_rewriter import SkillPathRewriter
 from src.agent_core.skills.skill_registry import SkillRegistry
-from src.common.exceptions import SkillDefinitionInvalidError, SkillNotFoundError
+from src.common.exceptions import SkillNotFoundError
 
 _REFERENCES_SECTION_TITLE = "## 参考资料"
 
 
 class SkillActivationService:
-    """按名称激活一个 WORKFLOW 技能，返回已完成路径替换的正文文本。"""
+    """按名称激活一个技能，返回已完成路径替换的正文文本。"""
 
     def __init__(self, registry: SkillRegistry, path_rewriter: SkillPathRewriter | None = None) -> None:
         """初始化激活服务。
@@ -42,20 +46,13 @@ class SkillActivationService:
         Raises:
             SkillNotFoundError: 技能不存在，或存在但不在 `allowed_categories`
                 范围内（两者用同一措辞，不额外泄露"存在但你无权用"这一区分）。
-            SkillDefinitionInvalidError: 该技能是 `TOOL` 形态，不应该经
-                `load_skill` 加载——应该直接调用同名工具。
         """
         skill = self._registry.get(skill_name)
 
         if skill.category not in allowed_categories:
             raise SkillNotFoundError(f"技能 '{skill_name}' 未找到。已注册：{self._registry.names}")
 
-        if skill.kind is not SkillKind.WORKFLOW:
-            raise SkillDefinitionInvalidError(
-                f"技能 '{skill_name}' 是参数化工具技能，请直接调用同名工具而不是 load_skill"
-            )
-
-        reader = SkillContentReader(skill)
+        reader = SkillContentRepository(skill)
         body = reader.read_instructions()
         references = reader.read_references()
         if references:

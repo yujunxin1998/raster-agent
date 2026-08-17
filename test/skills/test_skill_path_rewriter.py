@@ -11,7 +11,6 @@ from src.common.constants import SkillCategory
 def _skill(skill_dir: Path) -> SkillDefinition:
     return SkillDefinition(
         name="data-analysis",
-        tool_name="data-analysis",
         description="",
         category=SkillCategory.DATABASE,
         skill_dir=skill_dir,

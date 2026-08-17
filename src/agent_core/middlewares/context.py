@@ -13,7 +13,6 @@ key）。`config["configurable"]` 只保留 LangGraph 框架本身需要的键�
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -39,11 +38,11 @@ class AgentRuntimeContext:
             把 Profile/Facts 只查一次；不写入 LangGraph Checkpoint（dataclass
             字段不参与状态持久化），新的用户消息到来时这个 context 实例本身
             就会被重新构造，天然失效，不需要显式清空。
-        secrets: 本次请求携带的密钥值，键名对应 SKILL.md `required_secrets`
-            里声明的名字，供 `SkillToolFactory._resolve_secret_env` 做"三重
-            交集"校验后按需注入子进程环境变量，绝不进入对话消息/日志/
-            checkpoint。目前调用方（`chat_pipeline.py`）尚未接入真实密钥
-            来源，恒为空字典。
+        explicit_skill_names: 用户/API 本次请求显式指定必须激活的技能名
+            （`SkillRouter.route()` 的 `forced` 判定信号之一，见
+            `docs/Skill与Tool完全解耦重构设计.md` 7.2 节）。目前调用方
+            （`chat_pipeline.py`）尚未提供真实来源（前端还没有"强制指定
+            技能"这个入口），恒为空元组，预留字段。
     """
 
     conversation_id: str
@@ -52,4 +51,4 @@ class AgentRuntimeContext:
     datasource_id: str | None = None
     registry_revision: int | None = None
     memory_cache: dict = field(default_factory=dict)
-    secrets: Mapping[str, str] = field(default_factory=dict)
+    explicit_skill_names: tuple[str, ...] = ()
