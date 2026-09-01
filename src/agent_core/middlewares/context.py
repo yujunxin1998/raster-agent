@@ -52,3 +52,9 @@ class AgentRuntimeContext:
     registry_revision: int | None = None
     memory_cache: dict = field(default_factory=dict)
     explicit_skill_names: tuple[str, ...] = ()
+    trace_id: str | None = None
+    task_id: str | None = None
+    parent_task_id: str | None = None
+    root_task_id: str | None = None
+    agent_name: str = "lead-agent"
+    delegation_depth: int = 0

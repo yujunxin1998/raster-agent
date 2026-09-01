@@ -93,7 +93,13 @@ async def test_known_subagent_type_dispatches_with_resolved_capabilities() -> No
     assert call_kwargs["tools"] == fake_tools
     assert call_kwargs["middleware"] == fake_middleware
     assert call_kwargs["task"] == "查一下天气"
-    assert call_kwargs["context"] is _CONTEXT
+    child_context = call_kwargs["context"]
+    assert child_context is not _CONTEXT
+    assert child_context.conversation_id == _CONTEXT.conversation_id
+    assert child_context.parent_task_id == _CONTEXT.task_id
+    assert child_context.agent_name == "web-researcher"
+    assert child_context.delegation_depth == _CONTEXT.delegation_depth + 1
+    assert child_context.task_id.startswith("subtask_")
 
 
 async def test_required_capability_missing_returns_error_without_calling_run_subagent() -> None:

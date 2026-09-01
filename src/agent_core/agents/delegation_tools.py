@@ -33,18 +33,26 @@ Guardrail 拒绝时抛 `SubagentCapabilityUnavailable`，这里捕获后直接�
 
 import asyncio
 
-from langgraph.prebuilt import ToolRuntime
 from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.prebuilt import ToolRuntime
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from src.agent_core.agents.delegation_protocol import (
+    build_delegation_task_id,
+    derive_subagent_context,
+)
 from src.agent_core.agents.sub_agent_factory import run_subagent
 from src.agent_core.agents.subagent_capability_resolver import (
     SubagentCapabilityUnavailable,
     SubagentRunMetadata,
     resolve_subagent_capabilities,
 )
-from src.agent_core.agents.subagent_profiles import SUBAGENT_ONLY_TOOLS, get_profile, list_subagent_types
+from src.agent_core.agents.subagent_profiles import (
+    SUBAGENT_ONLY_TOOLS,
+    get_profile,
+    list_subagent_types,
+)
 from src.agent_core.guardrail import get_guardrail_provider
 from src.agent_core.middlewares.context import AgentRuntimeContext
 from src.agent_core.skills import get_skill_manager
@@ -123,12 +131,22 @@ def build_task_tool() -> BaseTool:
                 )
                 logger.info(f"[task] 能力解析完成 {metadata}")
 
+                task_id = build_delegation_task_id(
+                    conversation_id=runtime.context.conversation_id,
+                    parent_task_id=runtime.context.task_id,
+                    subagent_type=profile.name,
+                    task=task,
+                )
+                child_context = derive_subagent_context(
+                    runtime.context, task_id=task_id, agent_name=profile.name,
+                )
+
                 return await run_subagent(
                     agent_name=profile.name,
                     system_prompt=profile.system_prompt_factory(),
                     tools=resolved.tools,
                     task=task,
-                    context=runtime.context,
+                    context=child_context,
                     middleware=resolved.middleware,
                 )
             finally:

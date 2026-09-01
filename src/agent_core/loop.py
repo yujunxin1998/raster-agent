@@ -21,6 +21,7 @@ from src.agent_core.guardrail.guardrail_provider import GuardrailProvider
 from src.agent_core.memory.memory_context_builder import MemoryContextBuilder
 from src.agent_core.memory.memory_manager import MemoryManager
 from src.agent_core.middlewares.dangling_tool_call import DanglingToolCallMiddleware
+from src.agent_core.middlewares.delegation import DelegationMiddleware
 from src.agent_core.middlewares.guardrail import GuardrailMiddleware
 from src.agent_core.middlewares.input_sanitization import InputSanitizationMiddleware
 from src.agent_core.middlewares.loop_detection import LoopDetectionMiddleware
@@ -96,6 +97,7 @@ def build_middlewares(
         MemoryInjectionMiddleware(memory_context_builder),
         GuardrailMiddleware(guardrail_provider),
         SandboxMiddleware(sandbox_provider),
+        DelegationMiddleware(),
         ToolAuditMiddleware(),
         ToolErrorHandlingMiddleware(),
         LoopDetectionMiddleware(threshold=loop_detection_threshold),

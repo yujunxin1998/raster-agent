@@ -19,6 +19,8 @@ from src.agent_core.agents.subagent_capability_resolver import resolve_subagent_
 from src.agent_core.agents.subagent_profiles import SubagentProfile
 from src.agent_core.guardrail.guardrail_provider import GuardrailDecision, GuardrailProvider
 from src.agent_core.middlewares.context import AgentRuntimeContext
+from src.agent_core.middlewares.loop_detection import LoopDetectionMiddleware
+from src.agent_core.middlewares.tool_error_handling import ToolErrorHandlingMiddleware
 from src.agent_core.skills.skill_registry import SkillRegistry
 from src.agent_core.tools.registry.snapshot import RegistrySnapshot
 from src.agent_core.tools.registry.tool_definition import ToolDefinition
@@ -95,6 +97,9 @@ async def test_sub_agent_receives_context_without_outer_config() -> None:
 
     assert result == "子 Agent 的回复"
     assert mock_create.call_args.kwargs["context_schema"] is AgentRuntimeContext
+    child_middlewares = mock_create.call_args.kwargs["middleware"]
+    assert isinstance(child_middlewares[0], ToolErrorHandlingMiddleware)
+    assert isinstance(child_middlewares[1], LoopDetectionMiddleware)
     fake_sub_agent.ainvoke.assert_awaited_once()
     _, call_kwargs = fake_sub_agent.ainvoke.await_args
     assert call_kwargs == {"context": context}
